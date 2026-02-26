@@ -36,9 +36,11 @@ async def add_url(url: str) -> None:
             page = await ctx.new_page()
             await page.goto(
                 "https://app.speechify.com",
-                wait_until="networkidle",
-                timeout=30_000,
+                wait_until="load",
+                timeout=60_000,
             )
+            # Give the SPA a moment to hydrate after the page load event
+            await page.wait_for_timeout(2_000)
             _assert_logged_in(page)
             await _perform_add(page, url)
         finally:

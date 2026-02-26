@@ -121,6 +121,8 @@ async def setup():
             if auth_header.startswith("Bearer ") and "id_token" not in captured:
                 captured["id_token"] = auth_header.removeprefix("Bearer ")
                 captured["id_token_captured_at"] = time.time()
+                # Assume freshly issued — treat as valid for 1 hour
+                captured["id_token_expires_at"] = time.time() + 3600
 
             # Capture Firebase API key from any googleapis call that includes ?key=
             from urllib.parse import urlparse, parse_qs
