@@ -39,13 +39,12 @@ def cli():
               help="Read URLs from stdin")
 @click.option(
     "--mode",
-    type=click.Choice(["auto", "api", "browser"]),
-    default="auto",
+    type=click.Choice(["browser", "api"]),
+    default="browser",
     show_default=True,
     help=(
-        "auto: try API replay first, fall back to browser. "
-        "api: API replay only (fast, requires endpoint capture). "
-        "browser: browser automation only (slower, more robust)."
+        "browser: persistent headless Chrome — stays logged in for months (default). "
+        "api: replay captured endpoint — faster but requires re-setup if endpoint changes."
     ),
 )
 @click.pass_context
@@ -97,23 +96,32 @@ async def _add_one(url: str, mode: str) -> None:
 
     if mode == "api":
         await api.add_url(url)
-        return
-
-    if mode == "browser":
+    else:
         await browser.add_url(url)
-        return
 
-    # auto: try API first, fall back to browser
-    from . import config
-    cfg = config.load()
-    if cfg.get("add_endpoint"):
-        try:
-            await api.add_url(url)
-            return
-        except Exception as e:
-            click.echo(f"  API mode failed ({e}), retrying via browser...", err=True)
 
-    await browser.add_url(url)
+# ---------------------------------------------------------------------------
+# debug command
+# ---------------------------------------------------------------------------
+
+@cli.command()
+def debug():
+    """
+    Take screenshots of the Speechify UI to diagnose selector issues.
+
+    Saves screenshots + an element dump to:
+    ~/.config/speechify-add/debug-screenshots/
+    """
+    _run(_do_debug())
+
+
+async def _do_debug():
+    from . import browser as browser_module
+    screenshot_dir = await browser_module.screenshot_walkthrough()
+    click.echo(f"Screenshots saved to: {screenshot_dir}")
+    click.echo("Files:")
+    for f in sorted(screenshot_dir.iterdir()):
+        click.echo(f"  {f.name}")
 
 
 # ---------------------------------------------------------------------------
