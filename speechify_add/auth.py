@@ -122,16 +122,35 @@ async def setup():
                 captured["id_token"] = auth_header.removeprefix("Bearer ")
                 captured["id_token_captured_at"] = time.time()
 
-            # Capture Firebase API key from token-refresh calls
-            if "securetoken.googleapis.com" in request.url and "key=" in request.url:
-                from urllib.parse import urlparse, parse_qs
+            # Capture Firebase API key from any googleapis call that includes ?key=
+            from urllib.parse import urlparse, parse_qs
+            if "googleapis.com" in request.url and "key=" in request.url:
                 params = parse_qs(urlparse(request.url).query)
-                if params.get("key"):
+                if params.get("key") and not captured.get("firebase_api_key"):
                     captured["firebase_api_key"] = params["key"][0]
 
         async def on_response(response):
             url = response.url
             req = response.request
+
+            # ── Capture refresh token from Firebase auth responses ────────
+            if (
+                "securetoken.googleapis.com" in url
+                or "identitytoolkit.googleapis.com" in url
+            ) and req.method == "POST":
+                try:
+                    body = await response.json()
+                    if body.get("refreshToken") and not captured.get("refresh_token"):
+                        captured["refresh_token"] = body["refreshToken"]
+                    if body.get("idToken") and not captured.get("id_token"):
+                        captured["id_token"] = body["idToken"]
+                    # Also check nested structure
+                    user = body.get("users", [{}])[0] if "users" in body else {}
+                    stm = user.get("providerUserInfo", [])
+                    _ = stm  # not what we want here
+                except Exception:
+                    pass
+
             if req.method not in ("POST", "PUT", "PATCH"):
                 return
             if "add_endpoint" in captured:
@@ -139,9 +158,15 @@ async def setup():
             if "speechify" not in url:
                 return
 
+            # Exclude Firestore read/aggregate operations — these fire on page
+            # load and are not what we want
+            read_ops = ("runAggregationQuery", "runQuery", ":batchGet", ":listen")
+            if any(op in url for op in read_ops):
+                return
+
             # Heuristic: URL contains a path segment associated with adding content
             add_keywords = ("/items", "/queue", "/library", "/content", "/import",
-                            "/documents", "/listen", "/feed")
+                            "/documents/", "/listen", "/feed", "/v1/", "/v2/")
             if not any(kw in url for kw in add_keywords):
                 return
 
