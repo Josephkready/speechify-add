@@ -2,9 +2,9 @@
 CLI entry point.
 
 Usage:
-    speechify-add <url>
-    speechify-add --file urls.txt
-    speechify-add --stdin
+    speechify-add add <url>
+    speechify-add add --file urls.txt
+    speechify-add add --stdin
     speechify-add auth setup
     speechify-add auth refresh
 """
@@ -19,11 +19,19 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+
+@click.group(context_settings=CONTEXT_SETTINGS)
+def cli():
+    """Add articles to your Speechify listening queue."""
+
+
 # ---------------------------------------------------------------------------
-# Main command
+# add command
 # ---------------------------------------------------------------------------
 
-@click.group(invoke_without_command=True, context_settings={"help_option_names": ["-h", "--help"]})
+@cli.command()
 @click.argument("url", required=False)
 @click.option("--file", "-f", "file_path", type=click.Path(exists=True),
               help="File of URLs to add (one per line, # for comments)")
@@ -41,11 +49,8 @@ def _run(coro):
     ),
 )
 @click.pass_context
-def cli(ctx, url, file_path, from_stdin, mode):
-    """Add articles to your Speechify listening queue."""
-    if ctx.invoked_subcommand:
-        return
-
+def add(ctx, url, file_path, from_stdin, mode):
+    """Add one or more URLs to your Speechify library."""
     urls = _collect_urls(url, file_path, from_stdin)
     if not urls:
         click.echo(ctx.get_help())
@@ -112,7 +117,7 @@ async def _add_one(url: str, mode: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Auth subcommands
+# auth subcommands
 # ---------------------------------------------------------------------------
 
 @cli.group()
@@ -123,10 +128,10 @@ def auth():
 @auth.command("setup")
 def auth_setup():
     """
-    Run the one-time auth setup.
+    One-time auth setup — opens a browser window.
 
-    Opens a browser window — log in to Speechify, then add any URL to your
-    library so we can capture the API endpoint. Close the browser when done.
+    Log in to Speechify, add any URL to your library, then close the browser.
+    Captures your tokens and the API endpoint for future headless use.
     """
     _run(_do_auth_setup())
 
