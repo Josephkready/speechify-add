@@ -17,6 +17,17 @@ dependencies = [
 [project.scripts]
 speechify-add = "speechify_add.cli:cli"
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["speechify_add*"]

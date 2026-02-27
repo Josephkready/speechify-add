@@ -34,16 +34,18 @@ async def add_url(url: str, debug: bool = False) -> None:
         try:
             page = await ctx.new_page()
             await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+            # TODO: Replace fixed wait_for_timeout with event-driven waits
+            # (e.g., wait for a known dashboard element to appear)
             await page.wait_for_timeout(3_000)
 
             if debug:
-                _save_screenshot(page, "01-page-loaded")
+                await _save_screenshot(page, "01-page-loaded")
 
             _assert_logged_in(page)
             await _perform_add(page, url, debug=debug)
         except Exception:
             if debug:
-                _save_screenshot(page, "error-state")
+                await _save_screenshot(page, "error-state")
             raise
         finally:
             await ctx.close()
@@ -149,6 +151,8 @@ async def screenshot_walkthrough() -> Path:
 
 
 def _assert_logged_in(page):
+    # TODO: Use exact path-segment matching instead of substring search to avoid
+    # false positives on URLs like /login-settings or /authorize-device
     if any(s in page.url for s in ("/login", "/signin", "/sign-in", "/auth")):
         raise RuntimeError("Session expired. Run: speechify-add auth setup")
 
@@ -156,21 +160,25 @@ def _assert_logged_in(page):
 async def _perform_add(page, url: str, debug: bool = False) -> None:
     # ── Pre-load the URL into the clipboard ──────────────────────────────
     # "Paste Link" reads from the clipboard — we put the URL there first.
-    await page.evaluate(f"() => navigator.clipboard.writeText({repr(url)})")
+    await page.evaluate("(u) => navigator.clipboard.writeText(u)", url)
+
+    # TODO: These data-testid selectors are fragile — Speechify UI changes
+    # could break them. Consider adding a fallback selector chain or using
+    # the debug command to update selectors when breakage occurs.
 
     # ── Step 1: open the "New" dropdown ──────────────────────────────────
     await page.locator('[data-testid="sidebar-import-button"]').click()
     await page.wait_for_timeout(600)
 
     if debug:
-        _save_screenshot(page, "02-after-new-click")
+        await _save_screenshot(page, "02-after-new-click")
 
     # ── Step 2: click "Paste Link" ───────────────────────────────────────
     await page.locator('[data-testid="library-menu-item-paste-link"]').click()
     await page.wait_for_timeout(2_000)
 
     if debug:
-        _save_screenshot(page, "03-after-paste-link")
+        await _save_screenshot(page, "03-after-paste-link")
 
     # ── Step 3: if an input appears (not auto-submitted), fill and submit ─
     # Speechify may auto-submit if clipboard has a valid URL, or may show
@@ -191,7 +199,7 @@ async def _perform_add(page, url: str, debug: bool = False) -> None:
         await page.wait_for_timeout(300)
 
         if debug:
-            _save_screenshot(page, "04-url-filled")
+            await _save_screenshot(page, "04-url-filled")
 
         try:
             await _click_first_visible(page, [
@@ -209,10 +217,12 @@ async def _perform_add(page, url: str, debug: bool = False) -> None:
         # Auto-submitted — nothing more to do
         pass
 
+    # TODO: Detect success/failure from the UI (e.g., a toast notification or
+    # new item appearing) instead of a fixed 2-second wait.
     await page.wait_for_timeout(2_000)
 
     if debug:
-        _save_screenshot(page, "05-final")
+        await _save_screenshot(page, "05-final")
 
 
 # ---------------------------------------------------------------------------
@@ -223,12 +233,10 @@ class _StepSkipped(Exception):
     pass
 
 
-def _save_screenshot(page, name: str):
+async def _save_screenshot(page, name: str):
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     path = SCREENSHOT_DIR / f"{name}.png"
-    asyncio.get_event_loop().run_until_complete(
-        page.screenshot(path=str(path), full_page=True)
-    )
+    await page.screenshot(path=str(path), full_page=True)
 
 
 async def _click_first_visible(page, selectors, step, timeout=5_000):

@@ -12,6 +12,8 @@ import httpx
 
 from . import auth, config
 
+_URL_KEYS = {"url", "link", "href", "uri", "source", "address", "path"}
+
 
 async def add_url(url: str) -> None:
     cfg = config.load()
@@ -37,6 +39,7 @@ async def add_url(url: str) -> None:
             timeout=30,
         )
 
+    # TODO: Add retry with backoff for transient HTTP errors (429, 5xx)
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(
             f"API returned HTTP {resp.status_code}: {resp.text[:300]}"
@@ -75,12 +78,10 @@ def _replace_url_value(obj, new_url: str):
     Targets keys that suggest they hold a URL, and any string value that
     starts with http.
     """
-    URL_KEYS = {"url", "link", "href", "uri", "source", "address", "path"}
-
     if isinstance(obj, dict):
         result = {}
         for k, v in obj.items():
-            if k.lower() in URL_KEYS and isinstance(v, str) and v.startswith("http"):
+            if k.lower() in _URL_KEYS and isinstance(v, str) and v.startswith("http"):
                 result[k] = new_url
             else:
                 result[k] = _replace_url_value(v, new_url)
@@ -89,7 +90,9 @@ def _replace_url_value(obj, new_url: str):
     if isinstance(obj, list):
         return [_replace_url_value(item, new_url) for item in obj]
 
-    # Replace any bare URL string value
+    # TODO: This is aggressive — it replaces ANY string starting with "http",
+    # which could clobber non-URL values like "https-proxy" or "http2-enabled".
+    # Consider a stricter URL regex check.
     if isinstance(obj, str) and obj.startswith("http"):
         return new_url
 

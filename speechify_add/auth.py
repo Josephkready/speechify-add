@@ -12,7 +12,9 @@ stored refresh token, without opening a browser.
 """
 
 import asyncio
+import json
 import time
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -53,6 +55,7 @@ async def _refresh_id_token(data: dict) -> str:
             "Missing refresh token or Firebase API key. Run: speechify-add auth setup"
         )
 
+    # TODO: Add retry logic for transient network failures (e.g., 429, 503)
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"https://securetoken.googleapis.com/v1/token?key={api_key}",
@@ -116,6 +119,8 @@ async def setup():
         page = await ctx.new_page()
 
         # ── Intercept outgoing requests ──────────────────────────────────
+        # TODO: Add a timeout/progress indicator so the user knows capture is
+        # still running if they take a long time to log in.
         async def on_request(request):
             auth_header = request.headers.get("authorization", "")
             if auth_header.startswith("Bearer ") and "id_token" not in captured:
@@ -125,7 +130,6 @@ async def setup():
                 captured["id_token_expires_at"] = time.time() + 3600
 
             # Capture Firebase API key from any googleapis call that includes ?key=
-            from urllib.parse import urlparse, parse_qs
             if "googleapis.com" in request.url and "key=" in request.url:
                 params = parse_qs(urlparse(request.url).query)
                 if params.get("key") and not captured.get("firebase_api_key"):
@@ -146,10 +150,6 @@ async def setup():
                         captured["refresh_token"] = body["refreshToken"]
                     if body.get("idToken") and not captured.get("id_token"):
                         captured["id_token"] = body["idToken"]
-                    # Also check nested structure
-                    user = body.get("users", [{}])[0] if "users" in body else {}
-                    stm = user.get("providerUserInfo", [])
-                    _ = stm  # not what we want here
                 except Exception:
                     pass
 
@@ -166,7 +166,9 @@ async def setup():
             if any(op in url for op in read_ops):
                 return
 
-            # Heuristic: URL contains a path segment associated with adding content
+            # TODO: This heuristic is broad and may capture unrelated API calls.
+            # Consider tightening the filter or prompting the user to confirm
+            # which request is the correct "add" endpoint.
             add_keywords = ("/items", "/queue", "/library", "/content", "/import",
                             "/documents/", "/listen", "/feed", "/v1/", "/v2/")
             if not any(kw in url for kw in add_keywords):
@@ -257,9 +259,8 @@ def _extract_firebase_tokens(records: list, captured: dict):
         value = record.get("value") if isinstance(record, dict) else record
         if isinstance(value, str):
             try:
-                import json
                 value = json.loads(value)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 continue
         if not isinstance(value, dict):
             continue

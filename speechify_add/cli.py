@@ -55,6 +55,7 @@ def add(ctx, url, file_path, from_stdin, mode):
         click.echo(ctx.get_help())
         return
 
+    # TODO: Add --concurrency option for parallel batch processing
     success = fail = 0
     for u in urls:
         try:
@@ -73,14 +74,15 @@ def add(ctx, url, file_path, from_stdin, mode):
 
 
 def _collect_urls(url, file_path, from_stdin) -> list[str]:
+    # TODO: Add URL validation (reject non-http(s) strings, check for basic URL shape)
     if url:
         return [url]
     if file_path:
-        with open(file_path) as f:
+        with open(file_path, encoding="utf-8") as f:
             return [
                 line.strip()
                 for line in f
-                if line.strip() and not line.startswith("#")
+                if line.strip() and not line.strip().startswith("#")
             ]
     if from_stdin:
         return [
@@ -92,6 +94,7 @@ def _collect_urls(url, file_path, from_stdin) -> list[str]:
 
 
 async def _add_one(url: str, mode: str) -> None:
+    # TODO: Add automatic fallback from API to browser mode on failure
     from . import api, browser
 
     if mode == "api":
