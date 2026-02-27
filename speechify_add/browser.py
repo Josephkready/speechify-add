@@ -1,20 +1,136 @@
 """
 Browser automation via Playwright persistent context.
 
-The persistent Chromium profile (written during auth setup) stays logged in
-indefinitely — no token expiry, no refresh logic. This is the primary and
-default add method.
+Runs a headed (visible) Chromium window using the same persistent profile that
+auth setup created, so it's already logged in. The window opens briefly,
+performs the add, then closes automatically.
 
-Run `speechify-add debug` to take screenshots at each step and diagnose
-selector issues when the UI changes.
+Headed mode is required because Speechify's "Paste Link" feature uses the real
+system clipboard API, which only works correctly in a visible browser window.
 """
 
 import asyncio
+import os
+import subprocess
+import time
 from pathlib import Path
 
 from . import config
 
 SCREENSHOT_DIR = Path.home() / ".config" / "speechify-add" / "debug-screenshots"
+
+
+def _ensure_display():
+    """
+    Return (display_str, xvfb_proc).
+
+    If DISPLAY or WAYLAND_DISPLAY is already set, return it with proc=None.
+    Otherwise start a virtual Xvfb display and return its :N string and the
+    process handle (so the caller can clean it up).
+    """
+    display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    if display:
+        return display, None
+
+    # No display — spin up Xvfb
+    display_num = 99
+    proc = subprocess.Popen(
+        ["Xvfb", f":{display_num}", "-screen", "0", "1920x1080x24", "-ac"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.8)  # Give Xvfb time to initialise
+    os.environ["DISPLAY"] = f":{display_num}"
+    return f":{display_num}", proc
+
+
+async def add_text(text: str, title: str = "", debug: bool = False) -> str:
+    """
+    Add raw text to Speechify via the "Paste Text" UI flow.
+    Returns the Speechify document URL (e.g. https://app.speechify.com/item/<uuid>).
+    """
+    from playwright.async_api import async_playwright
+
+    profile_dir = config.BROWSER_PROFILE_DIR
+    if not profile_dir.exists():
+        raise RuntimeError("No browser profile found. Run: speechify-add auth setup")
+
+    _display, xvfb_proc = _ensure_display()
+
+    try:
+      async with async_playwright() as p:
+        ctx = await p.chromium.launch_persistent_context(
+            str(profile_dir),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+            permissions=["clipboard-read", "clipboard-write"],
+        )
+
+        try:
+            page = await ctx.new_page()
+            await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+            await page.locator('[data-testid="sidebar-import-button"]').wait_for(
+                state="visible", timeout=15_000
+            )
+            await page.wait_for_timeout(1_000)
+
+            if debug:
+                _save_screenshot(page, "text-01-page-loaded")
+
+            _assert_logged_in(page)
+
+            # Open "New" menu
+            await page.locator('[data-testid="sidebar-import-button"]').click()
+            await page.wait_for_timeout(600)
+
+            # Click "Paste Text"
+            await page.locator('[data-testid="library-menu-item-paste-text"]').click()
+            await page.wait_for_timeout(1_000)
+
+            if debug:
+                _save_screenshot(page, "text-02-paste-text-modal")
+
+            # Fill title (optional) and text
+            if title:
+                await page.locator('input[placeholder="Optional"]').fill(title)
+            await page.locator('textarea[placeholder="Type or paste text here"]').fill(text)
+            await page.wait_for_timeout(500)
+
+            if debug:
+                _save_screenshot(page, "text-03-filled")
+
+            # Click "Save File"
+            await page.locator('[data-testid="add-text-save-button"]').click()
+
+            # Wait for processing — page redirects to /item/<uuid> when done
+            doc_url = ""
+            for _ in range(30):
+                await page.wait_for_timeout(1_000)
+                if "/item/" in page.url:
+                    doc_url = page.url
+                    break
+
+            if not doc_url:
+                raise RuntimeError(
+                    "Timed out waiting for Speechify to process the text. "
+                    f"Final URL: {page.url}"
+                )
+
+            if debug:
+                _save_screenshot(page, "text-04-done")
+
+            return doc_url
+
+        except Exception:
+            if debug:
+                _save_screenshot(page, "text-error-state")
+            raise
+        finally:
+            await ctx.close()
+    finally:
+        if xvfb_proc is not None:
+            xvfb_proc.terminate()
+            xvfb_proc.wait()
 
 
 async def add_url(url: str, debug: bool = False) -> None:
@@ -24,29 +140,53 @@ async def add_url(url: str, debug: bool = False) -> None:
     if not profile_dir.exists():
         raise RuntimeError("No browser profile found. Run: speechify-add auth setup")
 
-    async with async_playwright() as p:
+    _display, xvfb_proc = _ensure_display()
+
+    try:
+      async with async_playwright() as p:
         ctx = await p.chromium.launch_persistent_context(
             str(profile_dir),
-            headless=True,
+            headless=False,
             args=["--disable-blink-features=AutomationControlled"],
             permissions=["clipboard-read", "clipboard-write"],
         )
+
+        console_errors = []
         try:
             page = await ctx.new_page()
+            page.on("pageerror", lambda err: console_errors.append(str(err)))
+
             await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
-            await page.wait_for_timeout(3_000)
+            # Wait for the sidebar button to confirm the app is fully hydrated
+            await page.locator('[data-testid="sidebar-import-button"]').wait_for(
+                state="visible", timeout=15_000
+            )
+            await page.wait_for_timeout(1_000)
 
             if debug:
                 _save_screenshot(page, "01-page-loaded")
 
             _assert_logged_in(page)
             await _perform_add(page, url, debug=debug)
+
+            # Confirm the app didn't crash (Next.js error overlay)
+            crashed = await page.locator("text=Application error").count()
+            if crashed > 0:
+                raise RuntimeError(
+                    f"Speechify app crashed after Paste Link.\n"
+                    f"Page errors: {console_errors[:3]}"
+                )
+
         except Exception:
             if debug:
                 _save_screenshot(page, "error-state")
             raise
         finally:
             await ctx.close()
+    finally:
+        if xvfb_proc is not None:
+            xvfb_proc.terminate()
+            xvfb_proc.wait()
 
 
 async def screenshot_walkthrough() -> Path:
@@ -154,9 +294,12 @@ def _assert_logged_in(page):
 
 
 async def _perform_add(page, url: str, debug: bool = False) -> None:
-    # ── Pre-load the URL into the clipboard ──────────────────────────────
-    # "Paste Link" reads from the clipboard — we put the URL there first.
-    await page.evaluate(f"() => navigator.clipboard.writeText({repr(url)})")
+    # ── Write URL to the real system clipboard ────────────────────────────
+    # In headed mode the real clipboard API works; Speechify's "Paste Link"
+    # reads from it.  We write here AND keep it in window.__clipboardUrl as
+    # a belt-and-suspenders fallback.
+    await page.evaluate(f"navigator.clipboard.writeText({repr(url)})")
+    await page.evaluate(f"window.__clipboardUrl = {repr(url)}")
 
     # ── Step 1: open the "New" dropdown ──────────────────────────────────
     await page.locator('[data-testid="sidebar-import-button"]').click()

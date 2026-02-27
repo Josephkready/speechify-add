@@ -1,96 +1,129 @@
 """
-Approach 1: Consumer API replay.
+Add a URL to Speechify via the real API flow:
 
-Replays the HTTP request captured during auth setup, substituting in the
-target URL. Refreshes the Firebase ID token automatically before each call.
+  1. Upload an empty placeholder file to Firebase Storage → get a download token
+  2. POST to the sdk-createFileFromWebLink Cloud Function, which fetches the page
+     and adds it to the user's library
+
+This is the reliable, headless approach — no browser needed.
 """
 
+import base64
 import json
-import re
+import time
+import urllib.parse
+import uuid as _uuid
 
 import httpx
 
-from . import auth, config
+from . import auth
+
+_CLOUD_FN = (
+    "https://us-central1-speechifymobile.cloudfunctions.net/sdk-createFileFromWebLink"
+)
+_STORAGE_BASE = (
+    "https://firebasestorage.googleapis.com/v0/b/speechifymobile.appspot.com/o"
+)
 
 
 async def add_url(url: str) -> None:
-    cfg = config.load()
+    id_token = await auth.get_id_token()
+    user_id = _user_id_from_token(id_token)
+    doc_id = str(_uuid.uuid4())
+    storage_path = f"multiplatform/import/{user_id}/{doc_id}"
 
-    endpoint = cfg.get("add_endpoint")
-    if not endpoint:
-        raise RuntimeError(
-            "No API endpoint captured. Run: speechify-add auth setup "
-            "and add a URL to your library when prompted."
+    # Fetch page title (best-effort; fall back to hostname)
+    title = await _get_title(url)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # ── Step 1: create empty placeholder in Firebase Storage ─────────
+        download_token = await _upload_empty(client, id_token, storage_path)
+
+        source_stored_url = (
+            f"{_STORAGE_BASE}/{urllib.parse.quote(storage_path, safe='')}?"
+            f"alt=media&token={download_token}"
         )
 
-    id_token = await auth.get_id_token()
-
-    headers = _build_headers(cfg, id_token)
-    body = _build_body(cfg.get("add_body_example", ""), url)
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.request(
-            method=cfg.get("add_method", "POST"),
-            url=endpoint,
-            content=body,
-            headers=headers,
-            timeout=30,
+        # ── Step 2: call the Cloud Function ──────────────────────────────
+        resp = await client.post(
+            _CLOUD_FN,
+            headers={
+                "Authorization": f"Bearer {id_token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "userId": user_id,
+                "client": "WEB_APP",
+                "dateAdded": int(time.time()),
+                "recordTitle": title,
+                "url": url,
+                "sourceStoredURL": source_stored_url,
+                "storageBucket": "speechifymobile.appspot.com",
+                "storagePath": storage_path,
+                "recordUid": doc_id,
+                "type": "WEB",
+            },
         )
 
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(
-            f"API returned HTTP {resp.status_code}: {resp.text[:300]}"
+            f"sdk-createFileFromWebLink returned HTTP {resp.status_code}: "
+            f"{resp.text[:300]}"
         )
 
 
-def _build_headers(cfg: dict, id_token: str) -> dict:
-    # Start from captured headers, override auth
-    headers = dict(cfg.get("add_headers", {}))
-    headers["authorization"] = f"Bearer {id_token}"
-    if "content-type" not in {k.lower() for k in headers}:
-        headers["content-type"] = "application/json"
-    return headers
+async def _upload_empty(client: httpx.AsyncClient, id_token: str,
+                        storage_path: str) -> str:
+    """Upload a 0-byte placeholder to Firebase Storage. Returns the download token."""
+    upload_url = (
+        f"{_STORAGE_BASE}?name={urllib.parse.quote(storage_path, safe='')}"
+    )
+    resp = await client.post(
+        upload_url,
+        headers={
+            "Authorization": f"Bearer {id_token}",
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+        },
+        content=b"",
+    )
+    if resp.status_code not in (200, 200):
+        raise RuntimeError(
+            f"Firebase Storage upload returned HTTP {resp.status_code}: "
+            f"{resp.text[:200]}"
+        )
+    data = resp.json()
+    token = data.get("downloadTokens")
+    if not token:
+        raise RuntimeError(
+            f"Firebase Storage did not return a download token. Response: "
+            f"{json.dumps(data)[:200]}"
+        )
+    return token
 
 
-def _build_body(body_example: str, url: str) -> str:
-    """
-    Substitute the new URL into the captured request body.
-    Tries JSON-aware replacement first, falls back to regex.
-    """
-    if not body_example:
-        return json.dumps({"url": url, "type": "url"})
-
+def _user_id_from_token(id_token: str) -> str:
+    """Decode the Firebase JWT payload and return the user_id (uid)."""
     try:
-        data = json.loads(body_example)
-        data = _replace_url_value(data, url)
-        return json.dumps(data)
-    except (json.JSONDecodeError, ValueError):
-        # Fall back: replace any bare https?:// string in the raw body
-        return re.sub(r'https?://[^\s"\'\\]+', url, body_example)
+        payload_b64 = id_token.split(".")[1]
+        # JWT base64url — add padding
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        uid = payload.get("user_id") or payload.get("sub")
+        if not uid:
+            raise ValueError("no user_id/sub in JWT payload")
+        return uid
+    except Exception as e:
+        raise RuntimeError(f"Could not extract user ID from token: {e}") from e
 
 
-def _replace_url_value(obj, new_url: str):
-    """
-    Recursively replace URL-like string values in a parsed JSON structure.
-    Targets keys that suggest they hold a URL, and any string value that
-    starts with http.
-    """
-    URL_KEYS = {"url", "link", "href", "uri", "source", "address", "path"}
-
-    if isinstance(obj, dict):
-        result = {}
-        for k, v in obj.items():
-            if k.lower() in URL_KEYS and isinstance(v, str) and v.startswith("http"):
-                result[k] = new_url
-            else:
-                result[k] = _replace_url_value(v, new_url)
-        return result
-
-    if isinstance(obj, list):
-        return [_replace_url_value(item, new_url) for item in obj]
-
-    # Replace any bare URL string value
-    if isinstance(obj, str) and obj.startswith("http"):
-        return new_url
-
-    return obj
+async def _get_title(url: str) -> str:
+    """Fetch the page <title>; fall back to the URL's hostname."""
+    try:
+        from . import verify
+        title = await verify.get_page_title(url)
+        if title:
+            return title
+    except Exception:
+        pass
+    return urllib.parse.urlparse(url).hostname or url

@@ -99,12 +99,31 @@ async def setup():
     print("Speechify Auth Setup")
     print("─" * 60)
     print("A browser window will open. Please:")
-    print("  1. Log in to your Speechify account")
-    print("  2. Add any URL to your library (click + → URL)")
-    print("  3. Close the browser tab/window when done")
+    print("  1. Log in to your Speechify account (if not already logged in)")
+    print("  2. Click the 'New' button → 'Paste Link'")
+    print("  3. Paste ANY real URL and confirm (this captures the API endpoint)")
+    print("  4. Close the browser window when the URL has been added")
+    print()
+    print("  ⚠  Step 3 is critical — the tool needs to observe the network")
+    print("     call Speechify makes when adding a URL.")
     print("─" * 60)
 
+    import json as _json
+    from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+
     captured: dict = {}
+    # All POST/PUT requests logged here for manual inspection
+    debug_log_path = config.CONFIG_DIR / "auth-debug-requests.jsonl"
+    debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Domains we never care about (pure analytics/telemetry)
+    _SKIP = (
+        "google-analytics.com", "googletagmanager.com",
+        "segment.io", "segment.com",
+        "amplitude.com", "mixpanel.com", "hotjar.com",
+        "sentry.io", "datadog", "newrelic", "logrocket",
+        "grafana.net", "faro-collector", "faro-cloud-proxy",
+    )
 
     async with async_playwright() as p:
         ctx = await p.chromium.launch_persistent_context(
@@ -120,14 +139,11 @@ async def setup():
             auth_header = request.headers.get("authorization", "")
             if auth_header.startswith("Bearer ") and "id_token" not in captured:
                 captured["id_token"] = auth_header.removeprefix("Bearer ")
-                captured["id_token_captured_at"] = time.time()
-                # Assume freshly issued — treat as valid for 1 hour
                 captured["id_token_expires_at"] = time.time() + 3600
 
-            # Capture Firebase API key from any googleapis call that includes ?key=
-            from urllib.parse import urlparse, parse_qs
+            # Capture Firebase API key
             if "googleapis.com" in request.url and "key=" in request.url:
-                params = parse_qs(urlparse(request.url).query)
+                params = _parse_qs(_urlparse(request.url).query)
                 if params.get("key") and not captured.get("firebase_api_key"):
                     captured["firebase_api_key"] = params["key"][0]
 
@@ -146,46 +162,28 @@ async def setup():
                         captured["refresh_token"] = body["refreshToken"]
                     if body.get("idToken") and not captured.get("id_token"):
                         captured["id_token"] = body["idToken"]
-                    # Also check nested structure
-                    user = body.get("users", [{}])[0] if "users" in body else {}
-                    stm = user.get("providerUserInfo", [])
-                    _ = stm  # not what we want here
                 except Exception:
                     pass
 
             if req.method not in ("POST", "PUT", "PATCH"):
                 return
-            if "add_endpoint" in captured:
-                return
-            if "speechify" not in url:
+
+            # Skip pure telemetry/analytics domains
+            if any(skip in url for skip in _SKIP):
                 return
 
-            # Exclude Firestore read/aggregate operations — these fire on page
-            # load and are not what we want
-            read_ops = ("runAggregationQuery", "runQuery", ":batchGet", ":listen")
-            if any(op in url for op in read_ops):
-                return
-
-            # Heuristic: URL contains a path segment associated with adding content
-            add_keywords = ("/items", "/queue", "/library", "/content", "/import",
-                            "/documents/", "/listen", "/feed", "/v1/", "/v2/")
-            if not any(kw in url for kw in add_keywords):
-                return
-
+            # Log ALL remaining POST/PUT requests to the debug file
             try:
                 body = req.post_data or ""
-                if not body:
-                    return
-                captured["add_endpoint"] = url
-                captured["add_method"] = req.method
-                # Keep only stable, non-host headers
-                keep = {"content-type", "accept", "x-client-version",
-                        "x-firebase-gmpid", "x-goog-request-params"}
-                captured["add_headers"] = {
-                    k: v for k, v in req.headers.items() if k.lower() in keep
+                entry = {
+                    "url": url,
+                    "method": req.method,
+                    "body_len": len(body),
+                    "body_preview": body[:500],
+                    "content_type": req.headers.get("content-type", ""),
                 }
-                captured["add_body_example"] = body
-                print(f"\n✓ Captured API endpoint: {url}")
+                with open(debug_log_path, "a") as f:
+                    f.write(_json.dumps(entry) + "\n")
             except Exception:
                 pass
 
@@ -193,6 +191,7 @@ async def setup():
         page.on("response", on_response)
 
         await page.goto("https://app.speechify.com")
+        print(f"\nAll requests are being logged to:\n  {debug_log_path}")
         print("\nWaiting... (close the browser when done)\n")
 
         try:
@@ -209,21 +208,48 @@ async def setup():
 
         await ctx.close()
 
-    # ── Report and persist ───────────────────────────────────────────────
-    print("\n── Auth capture results ──")
+    # ── Analyse debug log to find the add-URL endpoint ───────────────────
+    import re as _re
+    import json as _json
+
+    add_candidates = []
+    try:
+        with open(debug_log_path) as f:
+            for line in f:
+                try:
+                    entry = _json.loads(line)
+                except Exception:
+                    continue
+                url = entry.get("url", "")
+                body = entry.get("body_preview", "")
+                # Skip Firestore read-only paths
+                if any(op in url for op in ("runAggregationQuery", "runQuery",
+                                            ":batchGet", ":listen")):
+                    continue
+                # Skip single-letter Segment paths
+                if _re.search(r"/v\d+/[a-z]$", url):
+                    continue
+                add_candidates.append(entry)
+    except FileNotFoundError:
+        pass
+
+    print(f"\n── Auth capture results ──")
     print(f"  Firebase API key : {'✓' if captured.get('firebase_api_key') else '✗ missing'}")
     print(f"  Refresh token    : {'✓' if captured.get('refresh_token') else '✗ missing'}")
     print(f"  ID token         : {'✓' if captured.get('id_token') else '✗ missing'}")
-    print(f"  Add endpoint     : {'✓ ' + captured['add_endpoint'] if captured.get('add_endpoint') else '✗ missing — add a URL to your library during setup'}")
 
-    if not captured.get("refresh_token"):
-        print("\n⚠  No refresh token captured.")
-        print("   Approach 1 (API replay) won't work until you re-run auth setup")
-        print("   and add a URL while the browser is open.")
-        print("   Approach 2 (browser automation) will still work.")
+    if add_candidates:
+        print(f"\n  POST/PUT requests captured ({len(add_candidates)} total):")
+        for e in add_candidates:
+            print(f"    {e['method']:6} {e['url']}")
+            print(f"           body ({e['body_len']}B): {e['body_preview'][:500]}")
+    else:
+        print(f"  ⚠  No candidate API requests captured.")
+        print(f"     See {debug_log_path} for full log.")
 
     config.save(captured)
     print(f"\n✓ Saved to {config.AUTH_FILE}")
+    print(f"  Debug log: {debug_log_path}")
 
 
 async def _read_firebase_indexeddb(page) -> list:
