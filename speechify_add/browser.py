@@ -7,6 +7,9 @@ performs the add, then closes automatically.
 
 Headed mode is required because Speechify's "Paste Link" feature uses the real
 system clipboard API, which only works correctly in a visible browser window.
+
+BrowserSession keeps Playwright + Chromium alive across multiple operations
+so that batch uploads don't pay the ~17s cold-start per file.
 """
 
 import asyncio
@@ -18,6 +21,144 @@ from pathlib import Path
 from . import config
 
 SCREENSHOT_DIR = Path.home() / ".config" / "speechify-add" / "debug-screenshots"
+
+
+# ---------------------------------------------------------------------------
+# BrowserSession — reusable session for batch operations
+# ---------------------------------------------------------------------------
+
+class BrowserSession:
+    """Async context manager that keeps a single Chromium instance alive.
+
+    Usage:
+        async with BrowserSession(debug=False) as session:
+            await session.add_url("https://example.com/article1")
+            await session.add_text("some text", title="My Doc")
+            await session.add_url("https://example.com/article2")
+    """
+
+    def __init__(self, debug: bool = False):
+        self.debug = debug
+        self._playwright = None
+        self._ctx = None
+        self._page = None
+        self._xvfb_proc = None
+        self._console_errors: list[str] = []
+
+    async def __aenter__(self):
+        from playwright.async_api import async_playwright
+
+        profile_dir = config.BROWSER_PROFILE_DIR
+        if not profile_dir.exists():
+            raise RuntimeError("No browser profile found. Run: speechify-add auth setup")
+
+        _display, self._xvfb_proc = _ensure_display()
+
+        self._pw_cm = async_playwright()
+        self._playwright = await self._pw_cm.__aenter__()
+        self._ctx = await self._playwright.chromium.launch_persistent_context(
+            str(profile_dir),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+            permissions=["clipboard-read", "clipboard-write"],
+        )
+        self._page = await self._ctx.new_page()
+        self._page.on("pageerror", lambda err: self._console_errors.append(str(err)))
+
+        await self._page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+        await self._page.locator('[data-testid="sidebar-import-button"]').wait_for(
+            state="visible", timeout=15_000
+        )
+        await self._page.wait_for_timeout(1_000)
+        _assert_logged_in(self._page)
+
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._ctx:
+            await self._ctx.close()
+        if self._pw_cm:
+            await self._pw_cm.__aexit__(exc_type, exc_val, exc_tb)
+        if self._xvfb_proc is not None:
+            self._xvfb_proc.terminate()
+            self._xvfb_proc.wait()
+        return False
+
+    async def _navigate_to_library(self):
+        """Navigate back to the Speechify library between operations."""
+        await self._page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+        await self._page.locator('[data-testid="sidebar-import-button"]').wait_for(
+            state="visible", timeout=15_000
+        )
+        await self._page.wait_for_timeout(1_000)
+
+    async def add_url(self, url: str) -> None:
+        """Add a URL via the Paste Link flow, reusing the open browser."""
+        self._console_errors.clear()
+
+        if self.debug:
+            _save_screenshot(self._page, "batch-url-01-before")
+
+        await _perform_add(self._page, url, debug=self.debug)
+
+        crashed = await self._page.locator("text=Application error").count()
+        if crashed > 0:
+            raise RuntimeError(
+                f"Speechify app crashed after Paste Link.\n"
+                f"Page errors: {self._console_errors[:3]}"
+            )
+
+        # Navigate back to library for the next operation
+        await self._navigate_to_library()
+
+    async def add_text(self, text: str, title: str = "") -> str:
+        """Add raw text via the Paste Text flow, reusing the open browser."""
+        page = self._page
+
+        if self.debug:
+            _save_screenshot(page, "batch-text-01-before")
+
+        # Open "New" menu
+        await page.locator('[data-testid="sidebar-import-button"]').click()
+        await page.wait_for_timeout(600)
+
+        # Click "Paste Text"
+        await page.locator('[data-testid="library-menu-item-paste-text"]').click()
+        await page.wait_for_timeout(1_000)
+
+        if self.debug:
+            _save_screenshot(page, "batch-text-02-modal")
+
+        # Fill title and text
+        if title:
+            await page.locator('input[placeholder="Optional"]').fill(title)
+        await page.locator('textarea[placeholder="Type or paste text here"]').fill(text)
+        await page.wait_for_timeout(500)
+
+        # Click "Save File"
+        await page.locator('[data-testid="add-text-save-button"]').click()
+
+        # Wait for redirect to /item/<uuid>
+        doc_url = ""
+        for _ in range(30):
+            await page.wait_for_timeout(1_000)
+            if "/item/" in page.url:
+                doc_url = page.url
+                break
+
+        if not doc_url:
+            raise RuntimeError(
+                "Timed out waiting for Speechify to process the text. "
+                f"Final URL: {page.url}"
+            )
+
+        if self.debug:
+            _save_screenshot(page, "batch-text-03-done")
+
+        # Navigate back to library for the next operation
+        await self._navigate_to_library()
+
+        return doc_url
 
 
 def _ensure_display():

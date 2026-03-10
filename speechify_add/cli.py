@@ -10,9 +10,11 @@ Usage:
 """
 
 import asyncio
+import re
 import sys
 
 import click
+import httpx
 
 
 def _run(coro):
@@ -55,6 +57,11 @@ def add(ctx, url, file_path, from_stdin, mode):
         click.echo(ctx.get_help())
         return
 
+    # Use batch mode (single browser session) when we have multiple URLs
+    if len(urls) > 1 and mode == "browser":
+        _run(_add_batch(urls))
+        return
+
     success = fail = 0
     for u in urls:
         try:
@@ -91,13 +98,117 @@ def _collect_urls(url, file_path, from_stdin) -> list[str]:
     return []
 
 
+_GOOGLE_DOCS_RE = re.compile(
+    r"https://docs\.google\.com/document/d/([a-zA-Z0-9_-]+)"
+)
+
+
+def _is_google_doc(url: str) -> bool:
+    return _GOOGLE_DOCS_RE.match(url) is not None
+
+
+def _google_doc_export_url(url: str) -> str:
+    """Convert a Google Docs URL to its plain-text export URL."""
+    m = _GOOGLE_DOCS_RE.match(url)
+    if not m:
+        raise ValueError(f"Not a Google Docs URL: {url}")
+    doc_id = m.group(1)
+    return f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+
+
+def _fetch_google_doc_text(url: str) -> str:
+    """Download a Google Doc as plain text via the public export endpoint."""
+    export_url = _google_doc_export_url(url)
+    resp = httpx.get(export_url, follow_redirects=True, timeout=30)
+    if resp.status_code in (401, 403):
+        raise RuntimeError(
+            f"Google Doc is private (HTTP {resp.status_code}). "
+            "Make the document publicly accessible, or copy the text manually "
+            "and use: speechify-add text --stdin -t \"Title\""
+        )
+    if resp.status_code == 404:
+        raise RuntimeError(
+            "Google Doc not found (404). Check that the URL is correct."
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"Google Doc export failed (HTTP {resp.status_code}). "
+            "Try sharing the document publicly or exporting manually."
+        )
+    return resp.text
+
+
+def _precheck_url(url: str) -> None:
+    """HTTP HEAD pre-check: raise if the URL requires authentication."""
+    try:
+        resp = httpx.head(url, follow_redirects=True, timeout=15)
+    except httpx.HTTPError:
+        # Network errors are not auth problems — let Speechify try it
+        return
+    if resp.status_code in (401, 403):
+        raise RuntimeError(
+            f"URL returned HTTP {resp.status_code} (unauthorized/forbidden). "
+            "Speechify won't be able to access this content. "
+            "Download the text and use: speechify-add text --stdin -t \"Title\""
+        )
+
+
 async def _add_one(url: str, mode: str) -> None:
     from . import api, browser
+
+    # Google Docs: export as text and upload via the text path
+    if _is_google_doc(url):
+        text = _fetch_google_doc_text(url)
+        # Derive a title from the first non-empty line
+        title = ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                title = stripped[:120]
+                break
+        await browser.add_text(text, title=title)
+        return
+
+    # For all other URLs, pre-check accessibility
+    _precheck_url(url)
 
     if mode == "api":
         await api.add_url(url)
     else:
         await browser.add_url(url)
+
+
+async def _add_batch(urls: list[str]) -> None:
+    """Add multiple URLs using a single browser session (much faster)."""
+    from .browser import BrowserSession
+
+    success = fail = 0
+    async with BrowserSession() as session:
+        for url in urls:
+            try:
+                if _is_google_doc(url):
+                    text = _fetch_google_doc_text(url)
+                    title = ""
+                    for line in text.splitlines():
+                        stripped = line.strip()
+                        if stripped:
+                            title = stripped[:120]
+                            break
+                    await session.add_text(text, title=title)
+                else:
+                    _precheck_url(url)
+                    await session.add_url(url)
+                click.echo(f"✓  {url}")
+                success += 1
+            except Exception as e:
+                click.echo(f"✗  {url}\n   {e}", err=True)
+                fail += 1
+
+    if len(urls) > 1:
+        click.echo(f"\n{success} added, {fail} failed")
+
+    if fail:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
