@@ -111,6 +111,100 @@ class BrowserSession:
         # Navigate back to library for the next operation
         await self._navigate_to_library()
 
+    async def delete_item(self, item_id: str) -> None:
+        """Delete an item from the Speechify library by its UUID."""
+        page = self._page
+
+        if self.debug:
+            _save_screenshot(page, "delete-01-before")
+
+        # Navigate to the item page
+        await page.goto(
+            f"https://app.speechify.com/item/{item_id}",
+            wait_until="load",
+            timeout=60_000,
+        )
+        await page.wait_for_timeout(2_000)
+
+        if self.debug:
+            _save_screenshot(page, "delete-02-item-page")
+
+        # Look for a three-dot / more menu button
+        try:
+            more_btn = await _find_first_visible(page, [
+                '[data-testid*="more"]',
+                '[data-testid*="menu"]',
+                '[aria-label*="More"]',
+                '[aria-label*="more"]',
+                '[aria-label*="Options"]',
+                '[aria-label*="options"]',
+                'button[aria-haspopup]',
+                'button[aria-haspopup="menu"]',
+                '[data-testid*="kebab"]',
+                '[data-testid*="ellipsis"]',
+            ], step="more/menu button", timeout=8_000)
+            await more_btn.click()
+            await page.wait_for_timeout(1_000)
+
+            if self.debug:
+                _save_screenshot(page, "delete-03-menu-open")
+        except _StepSkipped:
+            # No menu button found — delete button might be directly visible
+            pass
+
+        # Click the delete/remove option
+        await _click_first_visible(page, [
+            '[data-testid*="delete"]',
+            '[data-testid*="Delete"]',
+            '[data-testid*="trash"]',
+            '[data-testid*="remove"]',
+            'button:has-text("Delete")',
+            'button:has-text("Remove")',
+            '[role="menuitem"]:has-text("Delete")',
+            '[role="menuitem"]:has-text("Remove")',
+            'a:has-text("Delete")',
+            'div:has-text("Delete"):not(:has(div:has-text("Delete")))',
+        ], step="delete button", timeout=8_000)
+        await page.wait_for_timeout(1_000)
+
+        if self.debug:
+            _save_screenshot(page, "delete-04-after-delete-click")
+
+        # Handle confirmation dialog if one appears
+        try:
+            await _click_first_visible(page, [
+                '[data-testid*="confirm"]',
+                '[data-testid*="delete-confirm"]',
+                'button:has-text("Delete")',
+                'button:has-text("Confirm")',
+                'button:has-text("Yes")',
+                '[role="dialog"] button:has-text("Delete")',
+                '[role="dialog"] button:has-text("Confirm")',
+                '[role="alertdialog"] button:has-text("Delete")',
+            ], step="confirm deletion", timeout=5_000)
+        except _StepSkipped:
+            # No confirmation dialog — deletion may have proceeded directly
+            pass
+
+        await page.wait_for_timeout(2_000)
+
+        if self.debug:
+            _save_screenshot(page, "delete-05-done")
+
+        # Verify we got redirected back to library (or item is gone)
+        # The page should no longer be on the item URL
+        if f"/item/{item_id}" in page.url:
+            # Check if there's an error or "not found" indicator
+            not_found = await page.locator("text=not found").count()
+            gone = await page.locator("text=deleted").count()
+            if not_found == 0 and gone == 0:
+                raise RuntimeError(
+                    f"Deletion may have failed — still on item page: {page.url}"
+                )
+
+        # Navigate back to library for any subsequent operations
+        await self._navigate_to_library()
+
     async def add_text(self, text: str, title: str = "") -> str:
         """Add raw text via the Paste Text flow, reusing the open browser."""
         page = self._page
@@ -328,6 +422,12 @@ async def add_url(url: str, debug: bool = False) -> None:
         if xvfb_proc is not None:
             xvfb_proc.terminate()
             xvfb_proc.wait()
+
+
+async def delete_item(item_id: str, debug: bool = False) -> None:
+    """Delete an item from the Speechify library by its UUID."""
+    async with BrowserSession(debug=debug) as session:
+        await session.delete_item(item_id)
 
 
 async def screenshot_walkthrough() -> Path:
