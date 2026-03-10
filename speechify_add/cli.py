@@ -259,6 +259,53 @@ async def _add_text(content: str, title: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# delete command
+# ---------------------------------------------------------------------------
+
+_SPEECHIFY_ITEM_RE = re.compile(
+    r"(?:https?://app\.speechify\.com/item/)?"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def _parse_item_id(item: str) -> str:
+    """Extract a Speechify item UUID from a full URL or bare UUID string."""
+    m = _SPEECHIFY_ITEM_RE.search(item)
+    if not m:
+        raise click.BadParameter(
+            f"Could not parse a Speechify item UUID from: {item}\n"
+            "Expected a UUID like 783247eb-59c9-4ade-9027-e01f8d77d959 "
+            "or a URL like https://app.speechify.com/item/<uuid>"
+        )
+    return m.group(1)
+
+
+@cli.command()
+@click.argument("item", required=True)
+@click.option("--debug", is_flag=True, help="Save debug screenshots")
+def delete(item, debug):
+    """Delete an item from your Speechify library.
+
+    ITEM can be a full URL (https://app.speechify.com/item/UUID)
+    or just the UUID.
+    """
+    item_id = _parse_item_id(item)
+    click.echo(f"Deleting item {item_id} ...")
+    try:
+        _run(_do_delete(item_id, debug=debug))
+        click.echo(f"Deleted {item_id}")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+async def _do_delete(item_id: str, debug: bool = False):
+    from . import browser
+    await browser.delete_item(item_id, debug=debug)
+
+
+# ---------------------------------------------------------------------------
 # verify command
 # ---------------------------------------------------------------------------
 
