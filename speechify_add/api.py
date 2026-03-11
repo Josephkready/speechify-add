@@ -21,6 +21,9 @@ from . import auth
 _CLOUD_FN = (
     "https://us-central1-speechifymobile.cloudfunctions.net/sdk-createFileFromWebLink"
 )
+_ARCHIVE_FN = (
+    "https://us-central1-speechifymobile.cloudfunctions.net/sdk-firestore-archiveLibraryItem"
+)
 _STORAGE_BASE = (
     "https://firebasestorage.googleapis.com/v0/b/speechifymobile.appspot.com/o"
 )
@@ -68,6 +71,27 @@ async def add_url(url: str) -> None:
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(
             f"sdk-createFileFromWebLink returned HTTP {resp.status_code}: "
+            f"{resp.text[:300]}"
+        )
+
+
+async def delete_item(item_id: str) -> None:
+    """Delete (archive) a Speechify library item by its UUID."""
+    id_token = await auth.get_id_token()
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            _ARCHIVE_FN,
+            headers={
+                "Authorization": f"Bearer {id_token}",
+                "Content-Type": "application/json",
+            },
+            json={"rootItemId": item_id},
+        )
+
+    if resp.status_code not in (200, 201, 204):
+        raise RuntimeError(
+            f"archiveLibraryItem returned HTTP {resp.status_code}: "
             f"{resp.text[:300]}"
         )
 

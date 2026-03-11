@@ -226,7 +226,18 @@ class BrowserSession:
         # Fill title and text
         if title:
             await page.locator('input[placeholder="Optional"]').fill(title)
-        await page.locator('textarea[placeholder="Type or paste text here"]').fill(text)
+        # Use React-compatible JS setter — .fill() times out on large text (>100K chars)
+        textarea = page.locator('textarea[placeholder="Type or paste text here"]')
+        await textarea.evaluate(
+            """(el, val) => {
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLTextAreaElement.prototype, 'value'
+                ).set;
+                setter.call(el, val);
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+            }""",
+            text,
+        )
         await page.wait_for_timeout(500)
 
         # Click "Save File"
@@ -328,7 +339,18 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
             # Fill title (optional) and text
             if title:
                 await page.locator('input[placeholder="Optional"]').fill(title)
-            await page.locator('textarea[placeholder="Type or paste text here"]').fill(text)
+            # Use React-compatible JS setter — .fill() times out on large text (>100K chars)
+            textarea = page.locator('textarea[placeholder="Type or paste text here"]')
+            await textarea.evaluate(
+                """(el, val) => {
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    ).set;
+                    setter.call(el, val);
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                }""",
+                text,
+            )
             await page.wait_for_timeout(500)
 
             if debug:

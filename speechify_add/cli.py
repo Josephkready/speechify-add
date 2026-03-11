@@ -283,26 +283,26 @@ def _parse_item_id(item: str) -> str:
 
 @cli.command()
 @click.argument("item", required=True)
-@click.option("--debug", is_flag=True, help="Save debug screenshots")
-def delete(item, debug):
+def delete(item):
     """Delete an item from your Speechify library.
 
     ITEM can be a full URL (https://app.speechify.com/item/UUID)
     or just the UUID.
+
+    Uses the archiveLibraryItem API — no browser needed.
     """
     item_id = _parse_item_id(item)
-    click.echo(f"Deleting item {item_id} ...")
     try:
-        _run(_do_delete(item_id, debug=debug))
+        _run(_do_delete(item_id))
         click.echo(f"Deleted {item_id}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
-async def _do_delete(item_id: str, debug: bool = False):
-    from . import browser
-    await browser.delete_item(item_id, debug=debug)
+async def _do_delete(item_id: str) -> None:
+    from . import api
+    await api.delete_item(item_id)
 
 
 # ---------------------------------------------------------------------------
