@@ -194,17 +194,18 @@ async def setup():
         print(f"\nAll requests are being logged to:\n  {debug_log_path}")
         print("\nWaiting... (close the browser when done)\n")
 
+        # Read Firebase tokens from IndexedDB now — must happen while page is open.
+        # Captures pre-existing auth state for users already logged in.
+        try:
+            firebase_data = await _read_firebase_indexeddb(page)
+            _extract_firebase_tokens(firebase_data, captured)
+        except Exception:
+            pass
+
         try:
             await page.wait_for_event("close", timeout=600_000)
         except Exception:
             pass
-
-        # ── Read Firebase tokens from IndexedDB before closing ───────────
-        try:
-            firebase_data = await _read_firebase_indexeddb(page)
-            _extract_firebase_tokens(firebase_data, captured)
-        except Exception as e:
-            print(f"  (Could not read IndexedDB: {e})")
 
         await ctx.close()
 

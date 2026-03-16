@@ -97,7 +97,7 @@ class BrowserSession:
         self._console_errors.clear()
 
         if self.debug:
-            _save_screenshot(self._page, "batch-url-01-before")
+            await _save_screenshot(self._page, "batch-url-01-before")
 
         await _perform_add(self._page, url, debug=self.debug)
 
@@ -116,7 +116,7 @@ class BrowserSession:
         page = self._page
 
         if self.debug:
-            _save_screenshot(page, "delete-01-before")
+            await _save_screenshot(page, "delete-01-before")
 
         # Navigate to the item page
         await page.goto(
@@ -127,7 +127,7 @@ class BrowserSession:
         await page.wait_for_timeout(2_000)
 
         if self.debug:
-            _save_screenshot(page, "delete-02-item-page")
+            await _save_screenshot(page, "delete-02-item-page")
 
         # Look for a three-dot / more menu button
         try:
@@ -147,7 +147,7 @@ class BrowserSession:
             await page.wait_for_timeout(1_000)
 
             if self.debug:
-                _save_screenshot(page, "delete-03-menu-open")
+                await _save_screenshot(page, "delete-03-menu-open")
         except _StepSkipped:
             # No menu button found — delete button might be directly visible
             pass
@@ -168,7 +168,7 @@ class BrowserSession:
         await page.wait_for_timeout(1_000)
 
         if self.debug:
-            _save_screenshot(page, "delete-04-after-delete-click")
+            await _save_screenshot(page, "delete-04-after-delete-click")
 
         # Handle confirmation dialog if one appears
         try:
@@ -189,7 +189,7 @@ class BrowserSession:
         await page.wait_for_timeout(2_000)
 
         if self.debug:
-            _save_screenshot(page, "delete-05-done")
+            await _save_screenshot(page, "delete-05-done")
 
         # Verify we got redirected back to library (or item is gone)
         # The page should no longer be on the item URL
@@ -210,7 +210,7 @@ class BrowserSession:
         page = self._page
 
         if self.debug:
-            _save_screenshot(page, "batch-text-01-before")
+            await _save_screenshot(page, "batch-text-01-before")
 
         # Open "New" menu
         await page.locator('[data-testid="sidebar-import-button"]').click()
@@ -221,7 +221,7 @@ class BrowserSession:
         await page.wait_for_timeout(1_000)
 
         if self.debug:
-            _save_screenshot(page, "batch-text-02-modal")
+            await _save_screenshot(page, "batch-text-02-modal")
 
         # Fill title and text
         if title:
@@ -258,7 +258,7 @@ class BrowserSession:
             )
 
         if self.debug:
-            _save_screenshot(page, "batch-text-03-done")
+            await _save_screenshot(page, "batch-text-03-done")
 
         # Navigate back to library for the next operation
         await self._navigate_to_library()
@@ -321,7 +321,7 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
             await page.wait_for_timeout(1_000)
 
             if debug:
-                _save_screenshot(page, "text-01-page-loaded")
+                await _save_screenshot(page, "text-01-page-loaded")
 
             _assert_logged_in(page)
 
@@ -334,7 +334,7 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
             await page.wait_for_timeout(1_000)
 
             if debug:
-                _save_screenshot(page, "text-02-paste-text-modal")
+                await _save_screenshot(page, "text-02-paste-text-modal")
 
             # Fill title (optional) and text
             if title:
@@ -354,7 +354,7 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
             await page.wait_for_timeout(500)
 
             if debug:
-                _save_screenshot(page, "text-03-filled")
+                await _save_screenshot(page, "text-03-filled")
 
             # Click "Save File"
             await page.locator('[data-testid="add-text-save-button"]').click()
@@ -374,13 +374,13 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
                 )
 
             if debug:
-                _save_screenshot(page, "text-04-done")
+                await _save_screenshot(page, "text-04-done")
 
             return doc_url
 
         except Exception:
             if debug:
-                _save_screenshot(page, "text-error-state")
+                await _save_screenshot(page, "text-error-state")
             raise
         finally:
             await ctx.close()
@@ -421,7 +421,7 @@ async def add_url(url: str, debug: bool = False) -> None:
             await page.wait_for_timeout(1_000)
 
             if debug:
-                _save_screenshot(page, "01-page-loaded")
+                await _save_screenshot(page, "01-page-loaded")
 
             _assert_logged_in(page)
             await _perform_add(page, url, debug=debug)
@@ -436,7 +436,7 @@ async def add_url(url: str, debug: bool = False) -> None:
 
         except Exception:
             if debug:
-                _save_screenshot(page, "error-state")
+                await _save_screenshot(page, "error-state")
             raise
         finally:
             await ctx.close()
@@ -569,14 +569,14 @@ async def _perform_add(page, url: str, debug: bool = False) -> None:
     await page.wait_for_timeout(600)
 
     if debug:
-        _save_screenshot(page, "02-after-new-click")
+        await _save_screenshot(page, "02-after-new-click")
 
     # ── Step 2: click "Paste Link" ───────────────────────────────────────
     await page.locator('[data-testid="library-menu-item-paste-link"]').click()
     await page.wait_for_timeout(2_000)
 
     if debug:
-        _save_screenshot(page, "03-after-paste-link")
+        await _save_screenshot(page, "03-after-paste-link")
 
     # ── Step 3: if an input appears (not auto-submitted), fill and submit ─
     # Speechify may auto-submit if clipboard has a valid URL, or may show
@@ -597,7 +597,7 @@ async def _perform_add(page, url: str, debug: bool = False) -> None:
         await page.wait_for_timeout(300)
 
         if debug:
-            _save_screenshot(page, "04-url-filled")
+            await _save_screenshot(page, "04-url-filled")
 
         try:
             await _click_first_visible(page, [
@@ -618,7 +618,7 @@ async def _perform_add(page, url: str, debug: bool = False) -> None:
     await page.wait_for_timeout(2_000)
 
     if debug:
-        _save_screenshot(page, "05-final")
+        await _save_screenshot(page, "05-final")
 
 
 # ---------------------------------------------------------------------------
@@ -629,12 +629,10 @@ class _StepSkipped(Exception):
     pass
 
 
-def _save_screenshot(page, name: str):
+async def _save_screenshot(page, name: str):
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     path = SCREENSHOT_DIR / f"{name}.png"
-    asyncio.get_event_loop().run_until_complete(
-        page.screenshot(path=str(path), full_page=True)
-    )
+    await page.screenshot(path=str(path), full_page=True)
 
 
 async def _click_first_visible(page, selectors, step, timeout=5_000):
