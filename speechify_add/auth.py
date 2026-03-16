@@ -199,8 +199,8 @@ async def setup():
         try:
             firebase_data = await _read_firebase_indexeddb(page)
             _extract_firebase_tokens(firebase_data, captured)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  (Could not read IndexedDB: {e})")
 
         try:
             await page.wait_for_event("close", timeout=600_000)

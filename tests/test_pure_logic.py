@@ -8,6 +8,10 @@ from unittest.mock import patch
 import click
 import pytest
 
+from speechify_add.api import _user_id_from_token
+from speechify_add.cli import _parse_item_id, _is_google_doc, _google_doc_export_url, _collect_urls
+from speechify_add import config as speechify_config
+
 
 # ---------------------------------------------------------------------------
 # JWT helper
@@ -22,8 +26,6 @@ def _make_jwt(payload: dict) -> str:
 # ---------------------------------------------------------------------------
 # 1. _user_id_from_token
 # ---------------------------------------------------------------------------
-
-from speechify_add.api import _user_id_from_token
 
 
 class TestUserIdFromToken:
@@ -53,8 +55,6 @@ class TestUserIdFromToken:
 # 2. _parse_item_id
 # ---------------------------------------------------------------------------
 
-from speechify_add.cli import _parse_item_id
-
 _SAMPLE_UUID = "783247eb-59c9-4ade-9027-e01f8d77d959"
 
 
@@ -80,8 +80,6 @@ class TestParseItemId:
 # 3. _is_google_doc and _google_doc_export_url
 # ---------------------------------------------------------------------------
 
-from speechify_add.cli import _is_google_doc, _google_doc_export_url
-
 _GDOC_URL = "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/edit"
 _GDOC_ID = "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
 
@@ -106,9 +104,6 @@ class TestGoogleDoc:
 # 4. _collect_urls
 # ---------------------------------------------------------------------------
 
-from speechify_add.cli import _collect_urls
-
-
 class TestCollectUrls:
     def test_single_url_argument(self):
         result = _collect_urls("https://example.com/article", None, False)
@@ -122,9 +117,6 @@ class TestCollectUrls:
 # ---------------------------------------------------------------------------
 # 5. config.load()
 # ---------------------------------------------------------------------------
-
-from speechify_add import config as speechify_config
-
 
 class TestConfigLoad:
     def test_returns_empty_dict_when_auth_file_missing(self, tmp_path):
