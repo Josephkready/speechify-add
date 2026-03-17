@@ -12,7 +12,6 @@ BrowserSession keeps Playwright + Chromium alive across multiple operations
 so that batch uploads don't pay the ~17s cold-start per file.
 """
 
-import asyncio
 import os
 import subprocess
 import time
