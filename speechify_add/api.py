@@ -111,7 +111,7 @@ async def _upload_empty(client: httpx.AsyncClient, id_token: str,
         },
         content=b"",
     )
-    if resp.status_code not in (200, 200):
+    if resp.status_code not in (200, 201):
         raise RuntimeError(
             f"Firebase Storage upload returned HTTP {resp.status_code}: "
             f"{resp.text[:200]}"
