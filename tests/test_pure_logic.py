@@ -13,7 +13,7 @@ import pytest
 from speechify_add.api import _user_id_from_token
 from speechify_add.cli import (
     _parse_item_id, _is_google_doc, _google_doc_export_url,
-    _collect_urls, _collect_text, _title_from_text,
+    _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
 
@@ -118,22 +118,46 @@ class TestCollectUrls:
         result = _collect_urls(None, None, False)
         assert result == []
 
+    def test_from_file(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text(
+            "https://example.com/a\n"
+            "# this is a comment\n"
+            "\n"
+            "https://example.com/b\n"
+        )
+        result = _collect_urls(None, str(url_file), False)
+        assert result == ["https://example.com/a", "https://example.com/b"]
+
+    def test_from_file_skips_blank_lines(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text("\n\n  \n")
+        result = _collect_urls(None, str(url_file), False)
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
-# 5. _title_from_text
+# 5. _extract_title_from_text
 # ---------------------------------------------------------------------------
 
-class TestTitleFromText:
-    def test_extracts_first_non_empty_line(self):
-        assert _title_from_text("\n\n  Hello World  \nmore") == "Hello World"
+class TestExtractTitleFromText:
+    def test_title_from_first_line(self):
+        assert _extract_title_from_text("My Title\nBody text") == "My Title"
+
+    def test_skips_empty_lines(self):
+        assert _extract_title_from_text("\n\n  \nActual Title\nBody") == "Actual Title"
+
+    def test_empty_string(self):
+        assert _extract_title_from_text("") == ""
+
+    def test_whitespace_only(self):
+        assert _extract_title_from_text("   \n  \n  ") == ""
 
     def test_truncates_at_120_chars(self):
         long_line = "A" * 200
-        assert len(_title_from_text(long_line)) == 120
-
-    def test_returns_empty_for_blank_text(self):
-        assert _title_from_text("") == ""
-        assert _title_from_text("\n\n  \n") == ""
+        result = _extract_title_from_text(long_line)
+        assert len(result) == 120
+        assert result == "A" * 120
 
 
 # ---------------------------------------------------------------------------
@@ -141,29 +165,19 @@ class TestTitleFromText:
 # ---------------------------------------------------------------------------
 
 class TestCollectText:
-    def test_reads_from_file(self, tmp_path):
-        f = tmp_path / "input.txt"
-        f.write_text("hello world")
-        assert _collect_text(str(f), False) == "hello world"
+    def test_from_file(self, tmp_path):
+        text_file = tmp_path / "content.md"
+        text_file.write_text("Hello world")
+        result = _collect_text(str(text_file), False)
+        assert result == "Hello world"
 
-    def test_returns_empty_when_no_source(self):
-        assert _collect_text(None, False) == ""
-
-
-# ---------------------------------------------------------------------------
-# 7. _collect_urls with file
-# ---------------------------------------------------------------------------
-
-class TestCollectUrlsFile:
-    def test_reads_file_skips_comments_and_blanks(self, tmp_path):
-        f = tmp_path / "urls.txt"
-        f.write_text("# comment\nhttps://a.com\n\nhttps://b.com\n# another\n")
-        result = _collect_urls(None, str(f), False)
-        assert result == ["https://a.com", "https://b.com"]
+    def test_no_args_returns_empty(self):
+        result = _collect_text(None, False)
+        assert result == ""
 
 
 # ---------------------------------------------------------------------------
-# 8. config.load() and config.save()
+# 7. config.load() and config.save()
 # ---------------------------------------------------------------------------
 
 class TestConfigLoad:
@@ -181,31 +195,32 @@ class TestConfigLoad:
             result = speechify_config.load()
         assert result == {}
 
+    def test_save_and_load_round_trip(self, tmp_path):
+        fake_auth_file = tmp_path / "auth.json"
+        fake_config_dir = tmp_path
+        data = {"firebase_api_key": "test-key", "refresh_token": "test-token"}
+        with patch.object(speechify_config, "AUTH_FILE", fake_auth_file), \
+             patch.object(speechify_config, "CONFIG_DIR", fake_config_dir):
+            speechify_config.save(data)
+            result = speechify_config.load()
+        assert result == data
 
-class TestConfigSave:
-    def test_creates_file_with_restricted_permissions(self, tmp_path):
-        fake_config_dir = tmp_path / "cfg"
-        fake_auth_file = fake_config_dir / "auth.json"
-        with (
-            patch.object(speechify_config, "CONFIG_DIR", fake_config_dir),
-            patch.object(speechify_config, "AUTH_FILE", fake_auth_file),
-        ):
-            speechify_config.save({"token": "secret"})
-        assert fake_auth_file.exists()
+    def test_save_sets_file_permissions(self, tmp_path):
+        fake_auth_file = tmp_path / "auth.json"
+        fake_config_dir = tmp_path
+        with patch.object(speechify_config, "AUTH_FILE", fake_auth_file), \
+             patch.object(speechify_config, "CONFIG_DIR", fake_config_dir):
+            speechify_config.save({"key": "val"})
         mode = stat.S_IMODE(os.stat(fake_auth_file).st_mode)
         assert mode == 0o600
-        data = json.loads(fake_auth_file.read_text())
-        assert data == {"token": "secret"}
 
     def test_atomic_overwrite(self, tmp_path):
         fake_config_dir = tmp_path / "cfg"
         fake_config_dir.mkdir()
         fake_auth_file = fake_config_dir / "auth.json"
         fake_auth_file.write_text('{"old": true}')
-        with (
-            patch.object(speechify_config, "CONFIG_DIR", fake_config_dir),
-            patch.object(speechify_config, "AUTH_FILE", fake_auth_file),
-        ):
+        with patch.object(speechify_config, "CONFIG_DIR", fake_config_dir), \
+             patch.object(speechify_config, "AUTH_FILE", fake_auth_file):
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}

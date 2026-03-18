@@ -299,6 +299,7 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
 
 
 async def add_url(url: str, debug: bool = False) -> None:
+    """Add a URL to Speechify via the browser "Paste Link" flow."""
     async with BrowserSession(debug=debug) as session:
         await session.add_url(url)
 
@@ -418,8 +419,8 @@ async def _perform_add(page, url: str, debug: bool = False) -> None:
     # In headed mode the real clipboard API works; Speechify's "Paste Link"
     # reads from it.  We write here AND keep it in window.__clipboardUrl as
     # a belt-and-suspenders fallback.
-    await page.evaluate(f"navigator.clipboard.writeText({repr(url)})")
-    await page.evaluate(f"window.__clipboardUrl = {repr(url)}")
+    await page.evaluate("val => navigator.clipboard.writeText(val)", url)
+    await page.evaluate("val => { window.__clipboardUrl = val }", url)
 
     # ── Step 1: open the "New" dropdown ──────────────────────────────────
     await page.locator('[data-testid="sidebar-import-button"]').click()
