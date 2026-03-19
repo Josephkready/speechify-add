@@ -23,8 +23,8 @@ def save(data: dict):
     # Avoids a TOCTOU race where auth.json is briefly world-readable.
     fd, temp_path = tempfile.mkstemp(dir=CONFIG_DIR, suffix=".tmp")
     try:
-        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
             json.dump(data, f, indent=2)
         os.replace(temp_path, AUTH_FILE)
     except BaseException:
