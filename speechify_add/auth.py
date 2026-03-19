@@ -60,6 +60,11 @@ async def _refresh_id_token(data: dict) -> str:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=15,
         )
+        if resp.status_code == 400:
+            raise RuntimeError(
+                "Token refresh failed (HTTP 400) — your session may have expired "
+                "or been revoked. Run: speechify-add auth setup"
+            )
         resp.raise_for_status()
 
     result = resp.json()
