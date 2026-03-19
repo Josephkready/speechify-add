@@ -12,6 +12,7 @@ stored refresh token, without opening a browser.
 """
 
 import asyncio
+import re
 import time
 
 import httpx
@@ -178,13 +179,23 @@ async def setup():
                 return
 
             # Log ALL remaining POST/PUT requests to the debug file
+            # Redact sensitive fields to avoid leaking tokens
             try:
                 body = req.post_data or ""
+                body_preview = body[:500]
+                for sensitive in ("token", "idToken", "refreshToken",
+                                  "access_token", "refresh_token"):
+                    if sensitive in body_preview:
+                        body_preview = re.sub(
+                            rf'"{sensitive}"\s*:\s*"[^"]*"',
+                            f'"{sensitive}": "<REDACTED>"',
+                            body_preview,
+                        )
                 entry = {
                     "url": url,
                     "method": req.method,
                     "body_len": len(body),
-                    "body_preview": body[:500],
+                    "body_preview": body_preview,
                     "content_type": req.headers.get("content-type", ""),
                 }
                 with open(debug_log_path, "a") as f:

@@ -116,6 +116,15 @@ def _google_doc_export_url(url: str) -> str:
     return f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
 
 
+def _extract_title_from_text(text: str) -> str:
+    """Extract a title from the first non-empty line of text."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:120]
+    return ""
+
+
 async def _fetch_google_doc_text(url: str) -> str:
     """Download a Google Doc as plain text via the public export endpoint."""
     export_url = _google_doc_export_url(url)
@@ -155,14 +164,6 @@ async def _precheck_url(url: str) -> None:
         )
 
 
-def _title_from_text(text: str) -> str:
-    """Derive a title from the first non-empty line of text."""
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped[:120]
-    return ""
-
 
 async def _add_one(url: str, mode: str) -> None:
     from . import api, browser
@@ -170,7 +171,8 @@ async def _add_one(url: str, mode: str) -> None:
     # Google Docs: export as text and upload via the text path
     if _is_google_doc(url):
         text = await _fetch_google_doc_text(url)
-        await browser.add_text(text, title=_title_from_text(text))
+        title = _extract_title_from_text(text)
+        await browser.add_text(text, title=title)
         return
 
     # For all other URLs, pre-check accessibility
@@ -192,7 +194,8 @@ async def _add_batch(urls: list[str]) -> None:
             try:
                 if _is_google_doc(url):
                     text = await _fetch_google_doc_text(url)
-                    await session.add_text(text, title=_title_from_text(text))
+                    title = _extract_title_from_text(text)
+                    await session.add_text(text, title=title)
                 else:
                     await _precheck_url(url)
                     await session.add_url(url)
