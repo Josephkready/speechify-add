@@ -3,13 +3,18 @@ Pure-logic unit tests — no network, no subprocess, no browser.
 """
 import base64
 import json
+import os
+import stat
 from unittest.mock import patch
 
 import click
 import pytest
 
 from speechify_add.api import _user_id_from_token
-from speechify_add.cli import _parse_item_id, _is_google_doc, _google_doc_export_url, _collect_urls
+from speechify_add.cli import (
+    _parse_item_id, _is_google_doc, _google_doc_export_url,
+    _collect_urls, _collect_text, _title_from_text,
+)
 from speechify_add import config as speechify_config
 
 
@@ -118,6 +123,49 @@ class TestCollectUrls:
 # 5. config.load()
 # ---------------------------------------------------------------------------
 
+class TestTitleFromText:
+    def test_extracts_first_non_empty_line(self):
+        assert _title_from_text("\n\n  Hello World  \nmore") == "Hello World"
+
+    def test_truncates_at_120_chars(self):
+        long_line = "A" * 200
+        assert len(_title_from_text(long_line)) == 120
+
+    def test_returns_empty_for_blank_text(self):
+        assert _title_from_text("") == ""
+        assert _title_from_text("\n\n  \n") == ""
+
+
+# ---------------------------------------------------------------------------
+# 6. _collect_text
+# ---------------------------------------------------------------------------
+
+class TestCollectText:
+    def test_reads_from_file(self, tmp_path):
+        f = tmp_path / "input.txt"
+        f.write_text("hello world")
+        assert _collect_text(str(f), False) == "hello world"
+
+    def test_returns_empty_when_no_source(self):
+        assert _collect_text(None, False) == ""
+
+
+# ---------------------------------------------------------------------------
+# 7. _collect_urls with file
+# ---------------------------------------------------------------------------
+
+class TestCollectUrlsFile:
+    def test_reads_file_skips_comments_and_blanks(self, tmp_path):
+        f = tmp_path / "urls.txt"
+        f.write_text("# comment\nhttps://a.com\n\nhttps://b.com\n# another\n")
+        result = _collect_urls(None, str(f), False)
+        assert result == ["https://a.com", "https://b.com"]
+
+
+# ---------------------------------------------------------------------------
+# 8. config.load() and config.save()
+# ---------------------------------------------------------------------------
+
 class TestConfigLoad:
     def test_returns_empty_dict_when_auth_file_missing(self, tmp_path):
         fake_auth_file = tmp_path / "auth.json"
@@ -125,3 +173,39 @@ class TestConfigLoad:
         with patch.object(speechify_config, "AUTH_FILE", fake_auth_file):
             result = speechify_config.load()
         assert result == {}
+
+    def test_returns_empty_dict_on_corrupt_json(self, tmp_path):
+        fake_auth_file = tmp_path / "auth.json"
+        fake_auth_file.write_text("NOT VALID JSON{{{")
+        with patch.object(speechify_config, "AUTH_FILE", fake_auth_file):
+            result = speechify_config.load()
+        assert result == {}
+
+
+class TestConfigSave:
+    def test_creates_file_with_restricted_permissions(self, tmp_path):
+        fake_config_dir = tmp_path / "cfg"
+        fake_auth_file = fake_config_dir / "auth.json"
+        with (
+            patch.object(speechify_config, "CONFIG_DIR", fake_config_dir),
+            patch.object(speechify_config, "AUTH_FILE", fake_auth_file),
+        ):
+            speechify_config.save({"token": "secret"})
+        assert fake_auth_file.exists()
+        mode = stat.S_IMODE(os.stat(fake_auth_file).st_mode)
+        assert mode == 0o600
+        data = json.loads(fake_auth_file.read_text())
+        assert data == {"token": "secret"}
+
+    def test_atomic_overwrite(self, tmp_path):
+        fake_config_dir = tmp_path / "cfg"
+        fake_config_dir.mkdir()
+        fake_auth_file = fake_config_dir / "auth.json"
+        fake_auth_file.write_text('{"old": true}')
+        with (
+            patch.object(speechify_config, "CONFIG_DIR", fake_config_dir),
+            patch.object(speechify_config, "AUTH_FILE", fake_auth_file),
+        ):
+            speechify_config.save({"new": True})
+        data = json.loads(fake_auth_file.read_text())
+        assert data == {"new": True}

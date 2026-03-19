@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config" / "speechify-add"
@@ -10,10 +11,22 @@ BROWSER_PROFILE_DIR = CONFIG_DIR / "browser-profile"
 def load() -> dict:
     if not AUTH_FILE.exists():
         return {}
-    return json.loads(AUTH_FILE.read_text())
+    try:
+        return json.loads(AUTH_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def save(data: dict):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    AUTH_FILE.write_text(json.dumps(data, indent=2))
-    os.chmod(AUTH_FILE, 0o600)
+    # Atomic write: create temp file with restricted permissions, then rename.
+    # Avoids a TOCTOU race where auth.json is briefly world-readable.
+    fd, temp_path = tempfile.mkstemp(dir=CONFIG_DIR, suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_path, AUTH_FILE)
+    except BaseException:
+        os.unlink(temp_path)
+        raise

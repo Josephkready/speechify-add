@@ -116,10 +116,11 @@ def _google_doc_export_url(url: str) -> str:
     return f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
 
 
-def _fetch_google_doc_text(url: str) -> str:
+async def _fetch_google_doc_text(url: str) -> str:
     """Download a Google Doc as plain text via the public export endpoint."""
     export_url = _google_doc_export_url(url)
-    resp = httpx.get(export_url, follow_redirects=True, timeout=30)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        resp = await client.get(export_url)
     if resp.status_code in (401, 403):
         raise RuntimeError(
             f"Google Doc is private (HTTP {resp.status_code}). "
@@ -138,10 +139,11 @@ def _fetch_google_doc_text(url: str) -> str:
     return resp.text
 
 
-def _precheck_url(url: str) -> None:
+async def _precheck_url(url: str) -> None:
     """HTTP HEAD pre-check: raise if the URL requires authentication."""
     try:
-        resp = httpx.head(url, follow_redirects=True, timeout=15)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            resp = await client.head(url)
     except httpx.HTTPError:
         # Network errors are not auth problems — let Speechify try it
         return
@@ -153,24 +155,26 @@ def _precheck_url(url: str) -> None:
         )
 
 
+def _title_from_text(text: str) -> str:
+    """Derive a title from the first non-empty line of text."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:120]
+    return ""
+
+
 async def _add_one(url: str, mode: str) -> None:
     from . import api, browser
 
     # Google Docs: export as text and upload via the text path
     if _is_google_doc(url):
-        text = _fetch_google_doc_text(url)
-        # Derive a title from the first non-empty line
-        title = ""
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped:
-                title = stripped[:120]
-                break
-        await browser.add_text(text, title=title)
+        text = await _fetch_google_doc_text(url)
+        await browser.add_text(text, title=_title_from_text(text))
         return
 
     # For all other URLs, pre-check accessibility
-    _precheck_url(url)
+    await _precheck_url(url)
 
     if mode == "api":
         await api.add_url(url)
@@ -187,16 +191,10 @@ async def _add_batch(urls: list[str]) -> None:
         for url in urls:
             try:
                 if _is_google_doc(url):
-                    text = _fetch_google_doc_text(url)
-                    title = ""
-                    for line in text.splitlines():
-                        stripped = line.strip()
-                        if stripped:
-                            title = stripped[:120]
-                            break
-                    await session.add_text(text, title=title)
+                    text = await _fetch_google_doc_text(url)
+                    await session.add_text(text, title=_title_from_text(text))
                 else:
-                    _precheck_url(url)
+                    await _precheck_url(url)
                     await session.add_url(url)
                 click.echo(f"✓  {url}")
                 success += 1
