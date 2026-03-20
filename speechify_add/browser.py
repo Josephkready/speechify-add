@@ -499,12 +499,26 @@ async def _click_first_visible(page, selectors, step, timeout=5_000):
 
 
 async def _find_first_visible(page, selectors, step, timeout=5_000):
-    per = max(500, timeout // len(selectors))
-    for selector in selectors:
-        try:
-            loc = page.locator(selector).first
-            await loc.wait_for(state="visible", timeout=per)
-            return loc
-        except Exception:
-            continue
+    import asyncio as _asyncio
+
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        per = max(200, int(remaining * 1000 / len(selectors)))
+        for selector in selectors:
+            try:
+                loc = page.locator(selector).first
+                await loc.wait_for(state="visible", timeout=per)
+                return loc
+            except Exception:
+                if time.monotonic() >= deadline:
+                    break
+                continue
+        # If we still have time, do a short sleep and retry all selectors
+        if time.monotonic() < deadline:
+            await _asyncio.sleep(0.2)
+        else:
+            break
     raise _StepSkipped(f"No visible element for '{step}'. Tried: {selectors}")

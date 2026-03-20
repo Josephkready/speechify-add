@@ -1,13 +1,15 @@
 """
 Pure-logic unit tests — no network, no subprocess, no browser.
 """
+import asyncio
 import base64
 import json
 import os
 import stat
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import click
+import httpx
 import pytest
 
 from speechify_add.api import _user_id_from_token
@@ -16,6 +18,7 @@ from speechify_add.cli import (
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
+from speechify_add import verify as speechify_verify
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +138,17 @@ class TestCollectUrls:
         result = _collect_urls(None, str(url_file), False)
         assert result == []
 
+    def test_from_file_skips_indented_comments(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text(
+            "https://example.com/a\n"
+            "  # indented comment\n"
+            "\t# tab-indented comment\n"
+            "https://example.com/b\n"
+        )
+        result = _collect_urls(None, str(url_file), False)
+        assert result == ["https://example.com/a", "https://example.com/b"]
+
 
 # ---------------------------------------------------------------------------
 # 5. _extract_title_from_text
@@ -224,3 +238,50 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+
+# ---------------------------------------------------------------------------
+# 8. verify.get_page_title
+# ---------------------------------------------------------------------------
+
+class TestGetPageTitle:
+    def test_html_entities_are_unescaped(self):
+        html_body = "<html><head><title>Tom &amp; Jerry&#39;s Adventure</title></head></html>"
+        mock_resp = httpx.Response(200, text=html_body, request=httpx.Request("GET", "https://example.com"))
+
+        async def mock_get(self, url, **kwargs):
+            return mock_resp
+
+        with patch.object(httpx.AsyncClient, "get", mock_get):
+            result = asyncio.run(speechify_verify.get_page_title("https://example.com"))
+        assert result == "Tom & Jerry's Adventure"
+
+    def test_multiline_title(self):
+        html_body = "<html><head><title>\n  Multi Line\n  Title\n</title></head></html>"
+        mock_resp = httpx.Response(200, text=html_body, request=httpx.Request("GET", "https://example.com"))
+
+        async def mock_get(self, url, **kwargs):
+            return mock_resp
+
+        with patch.object(httpx.AsyncClient, "get", mock_get):
+            result = asyncio.run(speechify_verify.get_page_title("https://example.com"))
+        assert result == "Multi Line\n  Title"
+
+    def test_no_title_returns_none(self):
+        html_body = "<html><head></head><body>No title</body></html>"
+        mock_resp = httpx.Response(200, text=html_body, request=httpx.Request("GET", "https://example.com"))
+
+        async def mock_get(self, url, **kwargs):
+            return mock_resp
+
+        with patch.object(httpx.AsyncClient, "get", mock_get):
+            result = asyncio.run(speechify_verify.get_page_title("https://example.com"))
+        assert result is None
+
+    def test_network_error_returns_none(self):
+        async def mock_get(self, url, **kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        with patch.object(httpx.AsyncClient, "get", mock_get):
+            result = asyncio.run(speechify_verify.get_page_title("https://example.com"))
+        assert result is None
