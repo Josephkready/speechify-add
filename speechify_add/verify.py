@@ -81,7 +81,7 @@ async def get_page_title(url: str) -> str | None:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             match = re.search(r"<title[^>]*>(.*?)</title>", resp.text, re.IGNORECASE | re.DOTALL)
             if match:
-                title = match.group(1).strip()
+                title = " ".join(match.group(1).split())
                 return _html.unescape(title)
     except Exception:
         pass

@@ -265,7 +265,7 @@ class TestGetPageTitle:
 
         with patch.object(httpx.AsyncClient, "get", mock_get):
             result = asyncio.run(speechify_verify.get_page_title("https://example.com"))
-        assert result == "Multi Line\n  Title"
+        assert result == "Multi Line Title"
 
     def test_no_title_returns_none(self):
         html_body = "<html><head></head><body>No title</body></html>"
