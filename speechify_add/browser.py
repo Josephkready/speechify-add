@@ -10,6 +10,24 @@ system clipboard API, which only works correctly in a visible browser window.
 
 BrowserSession keeps Playwright + Chromium alive across multiple operations
 so that batch uploads don't pay the ~17s cold-start per file.
+
+Migration note (chrome-hub)
+---------------------------
+This module should eventually use chrome-hub (https://github.com/Josephkready/chrome-hub)
+for shared browser management instead of launching its own Chromium instance.
+chrome-hub provides a persistent Chrome process via CDP, eliminating the ~17s
+cold-start entirely.
+
+Blockers:
+  - chrome-hub currently only exposes a sync API (``browser_context()`` context
+    manager using ``playwright.sync_api``). This module uses async Playwright
+    throughout (``async_playwright``, ``await``, ``async with``).
+  - Options: (a) add an async ``browser_context_async()`` to chrome-hub, or
+    (b) rewrite this module to use sync Playwright (viable since the CLI
+    already uses ``asyncio.run()`` as the only async boundary).
+
+The chrome-hub dependency is included in pyproject.toml so it's available
+when the migration happens.
 """
 
 import asyncio
