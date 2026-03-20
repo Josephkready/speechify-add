@@ -50,9 +50,8 @@ async def _refresh_id_token(data: dict) -> str:
     api_key = data.get("firebase_api_key")
 
     if not refresh_token or not api_key:
-        raise RuntimeError(
-            "Missing refresh token or Firebase API key. Run: speechify-add auth setup"
-        )
+        # Try chrome-hub fallback before giving up
+        return await _refresh_from_chrome_hub(data)
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -61,11 +60,9 @@ async def _refresh_id_token(data: dict) -> str:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=15,
         )
-        if resp.status_code == 400:
-            raise RuntimeError(
-                "Token refresh failed (HTTP 400) — your session may have expired "
-                "or been revoked. Run: speechify-add auth setup"
-            )
+        if resp.status_code in (400, 403):
+            # Firebase refresh failed — try extracting fresh tokens from chrome-hub
+            return await _refresh_from_chrome_hub(data)
         resp.raise_for_status()
 
     result = resp.json()
@@ -75,6 +72,53 @@ async def _refresh_id_token(data: dict) -> str:
     data["id_token"] = id_token
     data["refresh_token"] = result.get("refresh_token", refresh_token)
     data["id_token_expires_at"] = time.time() + expires_in
+    config.save(data)
+
+    return id_token
+
+
+async def _refresh_from_chrome_hub(data: dict) -> str:
+    """Extract fresh Firebase tokens from chrome-hub's logged-in Chrome session."""
+    try:
+        from chrome_hub import async_new_page
+    except ImportError:
+        raise RuntimeError(
+            "Token refresh failed and chrome-hub is not installed. "
+            "Run: speechify-add auth setup"
+        )
+
+    async with async_new_page() as page:
+        await page.goto("https://app.speechify.com", wait_until="load", timeout=30_000)
+        await page.wait_for_timeout(3_000)
+
+        if "auth" in page.url:
+            raise RuntimeError(
+                "Chrome-hub session is not logged into Speechify. "
+                "Run: speechify-add auth setup"
+            )
+
+        records = await _read_firebase_indexeddb(page)
+
+    captured: dict = {}
+    _extract_firebase_tokens(records, captured)
+
+    id_token = captured.get("id_token")
+    if not id_token:
+        raise RuntimeError(
+            "Could not extract Firebase token from chrome-hub session. "
+            "Run: speechify-add auth setup"
+        )
+
+    # Update stored auth data with fresh tokens
+    data["id_token"] = id_token
+    if captured.get("refresh_token"):
+        data["refresh_token"] = captured["refresh_token"]
+    if captured.get("firebase_api_key"):
+        data["firebase_api_key"] = captured["firebase_api_key"]
+    if captured.get("id_token_expires_at"):
+        data["id_token_expires_at"] = captured["id_token_expires_at"]
+    else:
+        data["id_token_expires_at"] = time.time() + 3600
     config.save(data)
 
     return id_token

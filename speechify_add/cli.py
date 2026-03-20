@@ -284,26 +284,31 @@ def _parse_item_id(item: str) -> str:
 
 @cli.command()
 @click.argument("item", required=True)
-def delete(item):
+@click.option("--mode", type=click.Choice(["browser", "api"]), default="browser",
+              show_default=True, help="browser: uses chrome-hub (default). api: Firebase API (requires valid token).")
+@click.option("--debug", is_flag=True, help="Save debug screenshots")
+def delete(item, mode, debug):
     """Delete an item from your Speechify library.
 
     ITEM can be a full URL (https://app.speechify.com/item/UUID)
     or just the UUID.
-
-    Uses the archiveLibraryItem API — no browser needed.
     """
     item_id = _parse_item_id(item)
     try:
-        _run(_do_delete(item_id))
+        _run(_do_delete(item_id, mode=mode, debug=debug))
         click.echo(f"Deleted {item_id}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
-async def _do_delete(item_id: str) -> None:
-    from . import api
-    await api.delete_item(item_id)
+async def _do_delete(item_id: str, mode: str = "browser", debug: bool = False) -> None:
+    if mode == "api":
+        from . import api
+        await api.delete_item(item_id)
+    else:
+        from . import browser
+        await browser.delete_item(item_id, debug=debug)
 
 
 # ---------------------------------------------------------------------------
