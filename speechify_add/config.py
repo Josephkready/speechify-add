@@ -12,7 +12,7 @@ def load() -> dict:
     if not AUTH_FILE.exists():
         return {}
     try:
-        return json.loads(AUTH_FILE.read_text())
+        return json.loads(AUTH_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
 
@@ -23,10 +23,10 @@ def save(data: dict):
     # Avoids a TOCTOU race where auth.json is briefly world-readable.
     fd, temp_path = tempfile.mkstemp(dir=CONFIG_DIR, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             os.fchmod(f.fileno(), 0o600)
             json.dump(data, f, indent=2)
         os.replace(temp_path, AUTH_FILE)
-    except BaseException:
+    except Exception:
         os.unlink(temp_path)
         raise

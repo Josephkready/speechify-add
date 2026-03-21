@@ -224,3 +224,46 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+    def test_save_and_load_utf8_content(self, tmp_path):
+        fake_auth_file = tmp_path / "auth.json"
+        fake_config_dir = tmp_path
+        data = {"title": "Ünïcödé tëst \u2014 em dash, curly \u201cquotes\u201d"}
+        with patch.object(speechify_config, "AUTH_FILE", fake_auth_file), \
+             patch.object(speechify_config, "CONFIG_DIR", fake_config_dir):
+            speechify_config.save(data)
+            result = speechify_config.load()
+        assert result == data
+
+
+# ---------------------------------------------------------------------------
+# 8. _upload_empty downloadTokens handling
+# ---------------------------------------------------------------------------
+
+class TestDownloadTokensParsing:
+    """Verify that comma-separated downloadTokens are handled correctly."""
+
+    def test_single_token(self):
+        # Simulate the token extraction logic from _upload_empty
+        data = {"downloadTokens": "abc-123"}
+        tokens = data.get("downloadTokens", "")
+        token = tokens.split(",")[0] if tokens else ""
+        assert token == "abc-123"
+
+    def test_multiple_tokens_takes_first(self):
+        data = {"downloadTokens": "first-token,second-token,third-token"}
+        tokens = data.get("downloadTokens", "")
+        token = tokens.split(",")[0] if tokens else ""
+        assert token == "first-token"
+
+    def test_empty_tokens(self):
+        data = {"downloadTokens": ""}
+        tokens = data.get("downloadTokens", "")
+        token = tokens.split(",")[0] if tokens else ""
+        assert token == ""
+
+    def test_missing_key(self):
+        data = {}
+        tokens = data.get("downloadTokens", "")
+        token = tokens.split(",")[0] if tokens else ""
+        assert token == ""

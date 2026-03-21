@@ -256,64 +256,8 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
     Add raw text to Speechify via the "Paste Text" UI flow.
     Returns the Speechify document URL (e.g. https://app.speechify.com/item/<uuid>).
     """
-    async with async_new_page() as page:
-        await _init_speechify_page(page)
-
-        if debug:
-            await _save_screenshot(page, "text-01-page-loaded")
-
-        # Open "New" menu
-        await page.locator('[data-testid="sidebar-import-button"]').click()
-        await page.wait_for_timeout(600)
-
-        # Click "Paste Text"
-        await page.locator('[data-testid="library-menu-item-paste-text"]').click()
-        await page.wait_for_timeout(1_000)
-
-        if debug:
-            await _save_screenshot(page, "text-02-paste-text-modal")
-
-        # Fill title (optional) and text
-        if title:
-            await page.locator('input[placeholder="Optional"]').fill(title)
-        # Use React-compatible JS setter — .fill() times out on large text (>100K chars)
-        textarea = page.locator('textarea[placeholder="Type or paste text here"]')
-        await textarea.evaluate(
-            """(el, val) => {
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                setter.call(el, val);
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-            }""",
-            text,
-        )
-        await page.wait_for_timeout(500)
-
-        if debug:
-            await _save_screenshot(page, "text-03-filled")
-
-        # Click "Save File"
-        await page.locator('[data-testid="add-text-save-button"]').click()
-
-        # Wait for processing — page redirects to /item/<uuid> when done
-        doc_url = ""
-        for _ in range(30):
-            await page.wait_for_timeout(1_000)
-            if "/item/" in page.url:
-                doc_url = page.url
-                break
-
-        if not doc_url:
-            raise RuntimeError(
-                "Timed out waiting for Speechify to process the text. "
-                f"Final URL: {page.url}"
-            )
-
-        if debug:
-            await _save_screenshot(page, "text-04-done")
-
-        return doc_url
+    async with BrowserSession(debug=debug) as session:
+        return await session.add_text(text, title=title)
 
 
 async def add_url(url: str, debug: bool = False) -> None:
@@ -522,12 +466,16 @@ async def _click_first_visible(page, selectors, step, timeout=5_000):
 
 
 async def _find_first_visible(page, selectors, step, timeout=5_000):
-    per = max(500, timeout // len(selectors))
-    for selector in selectors:
-        try:
-            loc = page.locator(selector).first
-            await loc.wait_for(state="visible", timeout=per)
-            return loc
-        except Exception:
-            continue
+    deadline = asyncio.get_event_loop().time() + timeout / 1000
+    while True:
+        for selector in selectors:
+            try:
+                loc = page.locator(selector).first
+                if await loc.is_visible():
+                    return loc
+            except Exception:
+                continue
+        if asyncio.get_event_loop().time() >= deadline:
+            break
+        await asyncio.sleep(0.3)
     raise _StepSkipped(f"No visible element for '{step}'. Tried: {selectors}")
