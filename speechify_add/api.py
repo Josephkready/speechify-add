@@ -117,14 +117,19 @@ async def _upload_empty(client: httpx.AsyncClient, id_token: str,
             f"{resp.text[:200]}"
         )
     data = resp.json()
-    tokens = data.get("downloadTokens", "")
-    token = tokens.split(",")[0] if tokens else ""
+    token = _extract_first_token(data)
     if not token:
         raise RuntimeError(
             f"Firebase Storage did not return a download token. Response: "
             f"{json.dumps(data)[:200]}"
         )
     return token
+
+
+def _extract_first_token(data: dict) -> str:
+    """Return the first download token from a Firebase Storage response."""
+    tokens = data.get("downloadTokens", "")
+    return tokens.split(",")[0] if tokens else ""
 
 
 def _user_id_from_token(id_token: str) -> str:

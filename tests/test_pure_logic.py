@@ -10,7 +10,7 @@ from unittest.mock import patch
 import click
 import pytest
 
-from speechify_add.api import _user_id_from_token
+from speechify_add.api import _user_id_from_token, _extract_first_token
 from speechify_add.cli import (
     _parse_item_id, _is_google_doc, _google_doc_export_url,
     _collect_urls, _collect_text, _extract_title_from_text,
@@ -244,26 +244,13 @@ class TestDownloadTokensParsing:
     """Verify that comma-separated downloadTokens are handled correctly."""
 
     def test_single_token(self):
-        # Simulate the token extraction logic from _upload_empty
-        data = {"downloadTokens": "abc-123"}
-        tokens = data.get("downloadTokens", "")
-        token = tokens.split(",")[0] if tokens else ""
-        assert token == "abc-123"
+        assert _extract_first_token({"downloadTokens": "abc-123"}) == "abc-123"
 
     def test_multiple_tokens_takes_first(self):
-        data = {"downloadTokens": "first-token,second-token,third-token"}
-        tokens = data.get("downloadTokens", "")
-        token = tokens.split(",")[0] if tokens else ""
-        assert token == "first-token"
+        assert _extract_first_token({"downloadTokens": "first-token,second-token,third-token"}) == "first-token"
 
     def test_empty_tokens(self):
-        data = {"downloadTokens": ""}
-        tokens = data.get("downloadTokens", "")
-        token = tokens.split(",")[0] if tokens else ""
-        assert token == ""
+        assert _extract_first_token({"downloadTokens": ""}) == ""
 
     def test_missing_key(self):
-        data = {}
-        tokens = data.get("downloadTokens", "")
-        token = tokens.split(",")[0] if tokens else ""
-        assert token == ""
+        assert _extract_first_token({}) == ""

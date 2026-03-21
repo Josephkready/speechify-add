@@ -466,7 +466,8 @@ async def _click_first_visible(page, selectors, step, timeout=5_000):
 
 
 async def _find_first_visible(page, selectors, step, timeout=5_000):
-    deadline = asyncio.get_event_loop().time() + timeout / 1000
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout / 1000
     while True:
         for selector in selectors:
             try:
@@ -475,7 +476,7 @@ async def _find_first_visible(page, selectors, step, timeout=5_000):
                     return loc
             except Exception:
                 continue
-        if asyncio.get_event_loop().time() >= deadline:
+        if loop.time() >= deadline:
             break
         await asyncio.sleep(0.3)
     raise _StepSkipped(f"No visible element for '{step}'. Tried: {selectors}")
