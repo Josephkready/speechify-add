@@ -57,6 +57,70 @@ async def search_library(query: str) -> list[dict]:
         return items
 
 
+def parse_progress_pct(meta: str) -> int | None:
+    """Parse listen progress from a Speechify library item meta string.
+
+    Examples:
+        "73% · web"  -> 73
+        "0% · pdf"   -> 0
+        "100% · txt" -> 100
+        ""           -> None
+    """
+    m = re.search(r"(\d+)%", meta)
+    return int(m.group(1)) if m else None
+
+
+async def search_library_batch(queries: list[str]) -> list[int | None]:
+    """
+    Search the Speechify library for multiple queries in a single browser session.
+
+    Returns a list of listen percentages (0-100) in the same order as queries.
+    Returns None for any query where no result was found.
+    """
+    async with async_new_page() as page:
+        await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+        await page.locator('[data-testid="sidebar-import-button"]').wait_for(
+            state="visible", timeout=15_000
+        )
+        await page.wait_for_timeout(2_000)
+
+        results: list[int | None] = []
+        for query in queries:
+            # Open search (toggle closes and re-opens cleanly between searches)
+            await page.locator('[data-testid="library-search-toggle-button"]').click()
+            await page.wait_for_timeout(300)
+            search_input = page.locator('[data-testid="library-search-input"]')
+            await search_input.wait_for(state="visible", timeout=5_000)
+            await search_input.fill(query)
+            await page.wait_for_timeout(2_000)
+
+            items = await page.evaluate("""
+                () => {
+                    const results = [];
+                    for (const btn of document.querySelectorAll('button')) {
+                        const text = btn.innerText?.trim();
+                        if (text && /\\d+%/.test(text) && /(web|pdf|txt|epub|mp3)/.test(text)) {
+                            const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
+                            results.push({ title: lines[0] || '', meta: lines.slice(1).join(' · ') });
+                        }
+                    }
+                    return results;
+                }
+            """)
+
+            if items:
+                pct = parse_progress_pct(items[0]["meta"])
+                results.append(pct)
+            else:
+                results.append(None)
+
+            # Close search bar before next iteration
+            await page.locator('[data-testid="library-search-toggle-button"]').click()
+            await page.wait_for_timeout(200)
+
+        return results
+
+
 async def get_page_title(url: str) -> str | None:
     """Fetch the <title> of a URL to use as a search term."""
     try:

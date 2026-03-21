@@ -369,6 +369,65 @@ async def _do_verify(query: str):
 
 
 # ---------------------------------------------------------------------------
+# progress command
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("title", required=False)
+@click.option("--batch", "batch_json", default=None,
+              help='JSON array of {"id": "uuid", "title": "..."} objects')
+@click.option("--batch-file", "batch_file", type=click.Path(exists=True), default=None,
+              help="Path to a JSON file containing the batch array")
+def progress(title, batch_json, batch_file):
+    """Query listen progress (0-100) for one or more Speechify library items.
+
+    Single mode:  speechify-add progress "Article title here"
+    Batch mode:   speechify-add progress --batch '[{"id":"uuid","title":"..."}]'
+                  speechify-add progress --batch-file /tmp/items.json
+
+    Single mode prints an integer (0-100) or exits 1 if not found.
+    Batch mode prints a JSON array: [{"id": "uuid", "listen_pct": 73}, ...]
+    """
+    if batch_json or batch_file:
+        _run(_do_progress_batch(batch_json, batch_file))
+    elif title:
+        _run(_do_progress_single(title))
+    else:
+        click.echo("Provide a TITLE or use --batch / --batch-file", err=True)
+        sys.exit(1)
+
+
+async def _do_progress_single(title: str):
+    from . import verify as verify_module
+    results = await verify_module.search_library_batch([title])
+    pct = results[0]
+    if pct is None:
+        click.echo(f"Not found: {title}", err=True)
+        sys.exit(1)
+    click.echo(pct)
+
+
+async def _do_progress_batch(batch_json: str | None, batch_file: str | None):
+    import json as _json
+    from . import verify as verify_module
+
+    if batch_file:
+        with open(batch_file) as f:
+            items = _json.load(f)
+    else:
+        items = _json.loads(batch_json)
+
+    titles = [item.get("title", "") for item in items]
+    pcts = await verify_module.search_library_batch(titles)
+
+    output = [
+        {"id": item.get("id", ""), "listen_pct": pct}
+        for item, pct in zip(items, pcts)
+    ]
+    click.echo(_json.dumps(output))
+
+
+# ---------------------------------------------------------------------------
 # debug command
 # ---------------------------------------------------------------------------
 
