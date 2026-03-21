@@ -6,7 +6,7 @@ import base64
 import json
 import os
 import stat
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import click
 import httpx
