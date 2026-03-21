@@ -14,6 +14,7 @@ from speechify_add.api import _user_id_from_token
 from speechify_add.cli import (
     _parse_item_id, _is_google_doc, _google_doc_export_url,
     _collect_urls, _collect_text, _extract_title_from_text,
+    _parse_progress, _load_batch_items,
 )
 from speechify_add import config as speechify_config
 
@@ -177,7 +178,60 @@ class TestCollectText:
 
 
 # ---------------------------------------------------------------------------
-# 7. config.load() and config.save()
+# 7. _parse_progress
+# ---------------------------------------------------------------------------
+
+class TestParseProgress:
+    def test_typical_meta(self):
+        assert _parse_progress("42% · web · 3 min") == 42
+
+    def test_zero_percent(self):
+        assert _parse_progress("0% · pdf") == 0
+
+    def test_hundred_percent(self):
+        assert _parse_progress("100% · epub · 12 min") == 100
+
+    def test_no_percentage(self):
+        assert _parse_progress("web · 3 min") is None
+
+    def test_empty_string(self):
+        assert _parse_progress("") is None
+
+
+# ---------------------------------------------------------------------------
+# 8. _load_batch_items
+# ---------------------------------------------------------------------------
+
+class TestLoadBatchItems:
+    def test_valid_json_string(self):
+        items = _load_batch_items('[{"title": "Article A"}]', None)
+        assert items == [{"title": "Article A"}]
+
+    def test_with_id(self):
+        items = _load_batch_items('[{"id": "abc", "title": "Article A"}]', None)
+        assert items[0]["id"] == "abc"
+
+    def test_from_file(self, tmp_path):
+        f = tmp_path / "items.json"
+        f.write_text('[{"title": "From File"}]')
+        items = _load_batch_items(None, str(f))
+        assert items == [{"title": "From File"}]
+
+    def test_invalid_json_raises(self):
+        with pytest.raises(click.BadParameter):
+            _load_batch_items("not json", None)
+
+    def test_missing_title_raises(self):
+        with pytest.raises(click.BadParameter):
+            _load_batch_items('[{"id": "abc"}]', None)
+
+    def test_not_array_raises(self):
+        with pytest.raises(click.BadParameter):
+            _load_batch_items('{"title": "not an array"}', None)
+
+
+# ---------------------------------------------------------------------------
+# 9. config.load() and config.save()
 # ---------------------------------------------------------------------------
 
 class TestConfigLoad:

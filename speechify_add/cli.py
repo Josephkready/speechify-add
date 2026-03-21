@@ -5,11 +5,13 @@ Usage:
     speechify-add add <url>
     speechify-add add --file urls.txt
     speechify-add add --stdin
+    speechify-add progress <query>
     speechify-add auth setup
     speechify-add auth refresh
 """
 
 import asyncio
+import json
 import re
 import sys
 
@@ -366,6 +368,101 @@ async def _do_verify(query: str):
         if item["meta"]:
             click.echo(f"     {item['meta']}")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# progress command
+# ---------------------------------------------------------------------------
+
+_PROGRESS_RE = re.compile(r"(\d+)%")
+
+
+def _parse_progress(meta: str) -> int | None:
+    """Extract the listen percentage (0–100) from a library item's meta string."""
+    m = _PROGRESS_RE.search(meta)
+    return int(m.group(1)) if m else None
+
+
+@cli.command()
+@click.argument("query", required=False)
+@click.option("--batch", "batch_json", default=None,
+              help='JSON array of objects with "title" keys')
+@click.option("--batch-file", "batch_file", type=click.Path(exists=True),
+              help="Path to a JSON file with batch items")
+@click.pass_context
+def progress(ctx, query, batch_json, batch_file):
+    """Query listen progress (percentage) for library items.
+
+    QUERY is a title or search term to look up a single item.
+
+    For batch lookups, use --batch or --batch-file with a JSON array
+    of objects containing "title" (and optionally "id") keys.
+
+    Examples:
+      speechify-add progress "My Article Title"
+      speechify-add progress --batch '[{"id":"abc","title":"Article"}]'
+      speechify-add progress --batch-file /tmp/items.json
+    """
+    if batch_json or batch_file:
+        items = _load_batch_items(batch_json, batch_file)
+        results = _run(_do_progress_batch(items))
+        click.echo(json.dumps(results))
+    elif query:
+        pct = _run(_do_progress_single(query))
+        if pct is None:
+            click.echo("null")
+            sys.exit(1)
+        click.echo(pct)
+    else:
+        click.echo(ctx.get_help())
+
+
+def _load_batch_items(batch_json: str | None, batch_file: str | None) -> list[dict]:
+    """Load batch items from a JSON string or file."""
+    raw = batch_json
+    if batch_file:
+        with open(batch_file) as f:
+            raw = f.read()
+    try:
+        items = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise click.BadParameter(f"Invalid JSON: {e}")
+    if not isinstance(items, list):
+        raise click.BadParameter("Expected a JSON array")
+    for item in items:
+        if "title" not in item:
+            raise click.BadParameter("Each item must have a \"title\" key")
+    return items
+
+
+async def _do_progress_single(query: str) -> int | None:
+    """Look up listen progress for a single item by title/search term."""
+    from . import verify as verify_module
+
+    results = await verify_module.search_library(query)
+    if not results:
+        return None
+
+    # Return progress from the best (first) match
+    return _parse_progress(results[0].get("meta", ""))
+
+
+async def _do_progress_batch(items: list[dict]) -> list[dict]:
+    """Look up listen progress for multiple items in a single browser session."""
+    from . import verify as verify_module
+
+    output = []
+    for item in items:
+        title = item["title"]
+        results = await verify_module.search_library(title)
+        pct = None
+        if results:
+            pct = _parse_progress(results[0].get("meta", ""))
+        entry = {"title": title, "listen_pct": pct}
+        if "id" in item:
+            entry["id"] = item["id"]
+        output.append(entry)
+    return output
 
 
 # ---------------------------------------------------------------------------
