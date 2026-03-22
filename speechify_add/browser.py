@@ -12,6 +12,7 @@ BrowserSession keeps Playwright + Chromium alive across multiple operations
 so that batch uploads don't pay the ~17s cold-start per file.
 """
 
+import asyncio
 import os
 import subprocess
 import time
@@ -499,8 +500,6 @@ async def _click_first_visible(page, selectors, step, timeout=5_000):
 
 
 async def _find_first_visible(page, selectors, step, timeout=5_000):
-    import asyncio as _asyncio
-
     deadline = time.monotonic() + timeout / 1000
     while True:
         remaining = deadline - time.monotonic()
@@ -518,7 +517,7 @@ async def _find_first_visible(page, selectors, step, timeout=5_000):
                 continue
         # If we still have time, do a short sleep and retry all selectors
         if time.monotonic() < deadline:
-            await _asyncio.sleep(0.2)
+            await asyncio.sleep(0.2)
         else:
             break
     raise _StepSkipped(f"No visible element for '{step}'. Tried: {selectors}")
