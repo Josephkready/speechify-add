@@ -27,6 +27,6 @@ def save(data: dict):
             os.fchmod(f.fileno(), 0o600)
             json.dump(data, f, indent=2)
         os.replace(temp_path, AUTH_FILE)
-    except BaseException:
+    except Exception:
         os.unlink(temp_path)
         raise

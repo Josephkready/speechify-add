@@ -16,6 +16,13 @@ from speechify_add.cli import (
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
+import re
+
+
+def parse_progress_pct(meta: str) -> int | None:
+    """Local copy of verify.parse_progress_pct to avoid chrome_hub import."""
+    m = re.search(r"(\d+)%", meta)
+    return int(m.group(1)) if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +231,103 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+    def test_save_does_not_catch_keyboard_interrupt(self, tmp_path):
+        """Verify save() does not swallow KeyboardInterrupt (BaseException)."""
+        fake_auth_file = tmp_path / "auth.json"
+        fake_config_dir = tmp_path
+        with patch.object(speechify_config, "AUTH_FILE", fake_auth_file), \
+             patch.object(speechify_config, "CONFIG_DIR", fake_config_dir), \
+             patch("json.dump", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                speechify_config.save({"key": "val"})
+
+
+# ---------------------------------------------------------------------------
+# 8. _collect_urls — indented comment handling
+# ---------------------------------------------------------------------------
+
+class TestCollectUrlsComments:
+    def test_indented_comments_are_skipped(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text(
+            "https://example.com/a\n"
+            "  # indented comment\n"
+            "\t# tab-indented comment\n"
+            "https://example.com/b\n"
+        )
+        result = _collect_urls(None, str(url_file), False)
+        assert result == ["https://example.com/a", "https://example.com/b"]
+
+    def test_comment_at_start_of_line(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text("# comment\nhttps://example.com/c\n")
+        result = _collect_urls(None, str(url_file), False)
+        assert result == ["https://example.com/c"]
+
+
+# ---------------------------------------------------------------------------
+# 9. parse_progress_pct
+# ---------------------------------------------------------------------------
+
+class TestParseProgressPct:
+    def test_zero_percent(self):
+        assert parse_progress_pct("0% · web") == 0
+
+    def test_mid_percent(self):
+        assert parse_progress_pct("73% · web") == 73
+
+    def test_hundred_percent(self):
+        assert parse_progress_pct("100% · txt") == 100
+
+    def test_no_percent(self):
+        assert parse_progress_pct("no progress here") is None
+
+    def test_empty_string(self):
+        assert parse_progress_pct("") is None
+
+    def test_multiple_percentages_returns_first(self):
+        assert parse_progress_pct("50% done 100% total") == 50
+
+
+# ---------------------------------------------------------------------------
+# 10. _user_id_from_token — additional edge cases
+# ---------------------------------------------------------------------------
+
+class TestUserIdFromTokenEdgeCases:
+    def test_empty_string_raises(self):
+        with pytest.raises(RuntimeError):
+            _user_id_from_token("")
+
+    def test_two_segment_token(self):
+        """A JWT with only header.payload (no signature) should still work."""
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"user_id": "uid-123"}).encode()
+        ).rstrip(b"=").decode()
+        header = base64.urlsafe_b64encode(
+            json.dumps({"alg": "none"}).encode()
+        ).rstrip(b"=").decode()
+        token = f"{header}.{payload}.sig"
+        assert _user_id_from_token(token) == "uid-123"
+
+    def test_user_id_empty_string_falls_back_to_sub(self):
+        token = _make_jwt({"user_id": "", "sub": "sub-fallback"})
+        assert _user_id_from_token(token) == "sub-fallback"
+
+
+# ---------------------------------------------------------------------------
+# 11. Google Docs edge cases
+# ---------------------------------------------------------------------------
+
+class TestGoogleDocEdgeCases:
+    def test_google_doc_with_query_params(self):
+        url = "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/edit?usp=sharing"
+        assert _is_google_doc(url) is True
+
+    def test_google_doc_without_edit(self):
+        url = "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+        assert _is_google_doc(url) is True
+
+    def test_google_spreadsheet_is_not_doc(self):
+        url = "https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/edit"
+        assert _is_google_doc(url) is False
