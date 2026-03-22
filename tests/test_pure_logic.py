@@ -4,6 +4,7 @@ Pure-logic unit tests — no network, no subprocess, no browser.
 import base64
 import json
 import os
+import re
 import stat
 from unittest.mock import patch
 
@@ -16,7 +17,6 @@ from speechify_add.cli import (
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
-import re
 
 
 def parse_progress_pct(meta: str) -> int | None:
