@@ -254,3 +254,6 @@ class TestDownloadTokensParsing:
 
     def test_missing_key(self):
         assert _extract_first_token({}) == ""
+
+    def test_none_value(self):
+        assert _extract_first_token({"downloadTokens": None}) == ""

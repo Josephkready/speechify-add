@@ -128,7 +128,7 @@ async def _upload_empty(client: httpx.AsyncClient, id_token: str,
 
 def _extract_first_token(data: dict) -> str:
     """Return the first download token from a Firebase Storage response."""
-    tokens = data.get("downloadTokens", "")
+    tokens = data.get("downloadTokens") or ""
     return tokens.split(",")[0] if tokens else ""
 
 
