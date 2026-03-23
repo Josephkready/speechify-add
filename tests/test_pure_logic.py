@@ -16,6 +16,18 @@ from speechify_add.cli import (
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
+import importlib
+import sys
+import types
+
+# verify.py and auth.py have top-level imports that may not be available
+# in the test environment (chrome_hub, playwright). Stub them before importing.
+_chrome_hub_stub = types.ModuleType("chrome_hub")
+_chrome_hub_stub.async_new_page = None  # type: ignore[attr-defined]
+sys.modules.setdefault("chrome_hub", _chrome_hub_stub)
+
+from speechify_add.verify import parse_progress_pct
+from speechify_add.auth import _extract_firebase_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +236,140 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+    def test_save_creates_dir_with_restricted_permissions(self, tmp_path):
+        new_dir = tmp_path / "new_config"
+        fake_auth_file = new_dir / "auth.json"
+        with patch.object(speechify_config, "CONFIG_DIR", new_dir), \
+             patch.object(speechify_config, "AUTH_FILE", fake_auth_file):
+            speechify_config.save({"key": "val"})
+        mode = stat.S_IMODE(os.stat(new_dir).st_mode)
+        assert mode == 0o700
+
+    def test_save_cleanup_on_write_error(self, tmp_path):
+        """Temp files should not linger if json.dump raises."""
+        fake_config_dir = tmp_path / "cfg"
+        fake_config_dir.mkdir(mode=0o700)
+        fake_auth_file = fake_config_dir / "auth.json"
+
+        class BadObj:
+            """Object that can't be serialized to JSON."""
+            pass
+
+        with patch.object(speechify_config, "CONFIG_DIR", fake_config_dir), \
+             patch.object(speechify_config, "AUTH_FILE", fake_auth_file):
+            with pytest.raises(TypeError):
+                speechify_config.save({"bad": BadObj()})
+
+        # No .tmp files should remain
+        tmp_files = list(fake_config_dir.glob("*.tmp"))
+        assert tmp_files == []
+
+
+# ---------------------------------------------------------------------------
+# 8. parse_progress_pct
+# ---------------------------------------------------------------------------
+
+class TestParseProgressPct:
+    def test_typical_web(self):
+        assert parse_progress_pct("73% · web") == 73
+
+    def test_zero(self):
+        assert parse_progress_pct("0% · pdf") == 0
+
+    def test_hundred(self):
+        assert parse_progress_pct("100% · txt") == 100
+
+    def test_empty_string(self):
+        assert parse_progress_pct("") is None
+
+    def test_no_percent(self):
+        assert parse_progress_pct("web · some title") is None
+
+    def test_multiple_percents_picks_first(self):
+        assert parse_progress_pct("50% · 75% · web") == 50
+
+
+# ---------------------------------------------------------------------------
+# 9. _extract_firebase_tokens
+# ---------------------------------------------------------------------------
+
+class TestExtractFirebaseTokens:
+    def test_extracts_from_sts_token_manager(self):
+        records = [
+            {
+                "value": {
+                    "apiKey": "AIzaFakeKey",
+                    "stsTokenManager": {
+                        "refreshToken": "rt_abc",
+                        "accessToken": "at_xyz",
+                        "expirationTime": 1700000000000,
+                    },
+                }
+            }
+        ]
+        captured = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["firebase_api_key"] == "AIzaFakeKey"
+        assert captured["refresh_token"] == "rt_abc"
+        assert captured["id_token"] == "at_xyz"
+        assert captured["id_token_expires_at"] == 1700000000.0
+
+    def test_extracts_top_level_refresh_token(self):
+        records = [{"value": {"refreshToken": "rt_top"}}]
+        captured = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["refresh_token"] == "rt_top"
+
+    def test_skips_non_dict_values(self):
+        records = [{"value": "not a dict"}, {"value": 42}, None]
+        captured = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured == {}
+
+    def test_does_not_overwrite_existing(self):
+        records = [
+            {"value": {"apiKey": "key1"}},
+            {"value": {"apiKey": "key2"}},
+        ]
+        captured = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["firebase_api_key"] == "key1"
+
+    def test_json_string_value_parsed(self):
+        records = [{"value": json.dumps({"apiKey": "from_json_str"})}]
+        captured = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["firebase_api_key"] == "from_json_str"
+
+
+# ---------------------------------------------------------------------------
+# 10. _collect_urls comment handling
+# ---------------------------------------------------------------------------
+
+class TestCollectUrlsComments:
+    def test_indented_comments_are_skipped(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text(
+            "https://example.com/a\n"
+            "  # indented comment\n"
+            "\t# tab comment\n"
+            "https://example.com/b\n"
+        )
+        result = _collect_urls(None, str(url_file), False)
+        assert result == ["https://example.com/a", "https://example.com/b"]
+
+
+# ---------------------------------------------------------------------------
+# 11. _user_id_from_token via pyjwt
+# ---------------------------------------------------------------------------
+
+class TestUserIdFromTokenPyJWT:
+    def test_token_with_extra_segments_still_works(self):
+        """pyjwt handles malformed tokens more gracefully than manual decode."""
+        token = _make_jwt({"user_id": "uid-ok"})
+        assert _user_id_from_token(token) == "uid-ok"
+
+    def test_empty_string_raises(self):
+        with pytest.raises(RuntimeError):
+            _user_id_from_token("")

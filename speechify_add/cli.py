@@ -87,7 +87,7 @@ def _collect_urls(url, file_path, from_stdin) -> list[str]:
             return [
                 line.strip()
                 for line in f
-                if line.strip() and not line.startswith("#")
+                if line.strip() and not line.strip().startswith("#")
             ]
     if from_stdin:
         return [
@@ -416,6 +416,12 @@ async def _do_progress_batch(batch_json: str | None, batch_file: str | None):
             items = _json.load(f)
     else:
         items = _json.loads(batch_json)
+
+    if not isinstance(items, list):
+        raise click.BadParameter("Batch data must be a JSON array")
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise click.BadParameter(f"Item {i} must be a JSON object")
 
     titles = [item.get("title", "") for item in items]
     pcts = await verify_module.search_library_batch(titles)
