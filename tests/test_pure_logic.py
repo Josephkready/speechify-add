@@ -300,7 +300,7 @@ class TestUserIdFromTokenEdgeCases:
             _user_id_from_token("")
 
     def test_two_segment_token(self):
-        """A JWT with only header.payload (no signature) should still work."""
+        """A JWT with a dummy signature segment should still parse."""
         payload = base64.urlsafe_b64encode(
             json.dumps({"user_id": "uid-123"}).encode()
         ).rstrip(b"=").decode()
