@@ -11,11 +11,13 @@ import click
 import pytest
 
 from speechify_add.api import _user_id_from_token
+from speechify_add.auth import _extract_firebase_tokens
 from speechify_add.cli import (
     _parse_item_id, _is_google_doc, _google_doc_export_url,
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
+from speechify_add.verify import parse_progress_pct
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +226,73 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+
+# ---------------------------------------------------------------------------
+# 8. parse_progress_pct
+# ---------------------------------------------------------------------------
+
+class TestParseProgressPct:
+    def test_percentage_with_type_tag(self):
+        assert parse_progress_pct("73% · web") == 73
+
+    def test_zero_percent(self):
+        assert parse_progress_pct("0% · pdf") == 0
+
+    def test_hundred_percent(self):
+        assert parse_progress_pct("100% · txt") == 100
+
+    def test_percentage_only(self):
+        assert parse_progress_pct("42%") == 42
+
+    def test_no_percentage_returns_none(self):
+        assert parse_progress_pct("web article") is None
+
+    def test_empty_string_returns_none(self):
+        assert parse_progress_pct("") is None
+
+
+# ---------------------------------------------------------------------------
+# 9. _extract_firebase_tokens
+# ---------------------------------------------------------------------------
+
+class TestExtractFirebaseTokens:
+    def test_extracts_api_key_and_tokens_from_sts_manager(self):
+        records = [{"value": {
+            "apiKey": "test-api-key",
+            "stsTokenManager": {
+                "refreshToken": "test-refresh",
+                "accessToken": "test-id-token",
+                "expirationTime": 1_700_000_000_000,
+            },
+        }}]
+        captured: dict = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["firebase_api_key"] == "test-api-key"
+        assert captured["refresh_token"] == "test-refresh"
+        assert captured["id_token"] == "test-id-token"
+        assert captured["id_token_expires_at"] == 1_700_000_000_000 / 1000
+
+    def test_does_not_overwrite_existing_values(self):
+        records = [{"value": {"apiKey": "new-key"}}]
+        captured = {"firebase_api_key": "existing-key"}
+        _extract_firebase_tokens(records, captured)
+        assert captured["firebase_api_key"] == "existing-key"
+
+    def test_empty_records_noop(self):
+        captured: dict = {}
+        _extract_firebase_tokens([], captured)
+        assert captured == {}
+
+    def test_json_string_value_is_parsed(self):
+        inner = {"apiKey": "str-key", "stsTokenManager": {}}
+        records = [{"value": json.dumps(inner)}]
+        captured: dict = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured.get("firebase_api_key") == "str-key"
+
+    def test_top_level_refresh_token_captured(self):
+        records = [{"value": {"refreshToken": "top-level-refresh"}}]
+        captured: dict = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["refresh_token"] == "top-level-refresh"

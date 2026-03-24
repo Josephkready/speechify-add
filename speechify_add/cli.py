@@ -83,7 +83,7 @@ def _collect_urls(url, file_path, from_stdin) -> list[str]:
     if url:
         return [url]
     if file_path:
-        with open(file_path) as f:
+        with open(file_path, encoding="utf-8") as f:
             return [
                 line.strip()
                 for line in f
@@ -247,7 +247,7 @@ def text(ctx, title, file_path, from_stdin):
 
 def _collect_text(file_path, from_stdin) -> str:
     if file_path:
-        with open(file_path) as f:
+        with open(file_path, encoding="utf-8") as f:
             return f.read()
     if from_stdin:
         return sys.stdin.read()
