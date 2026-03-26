@@ -232,8 +232,8 @@ class TestConfigLoad:
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
 
-    def test_save_does_not_catch_keyboard_interrupt(self, tmp_path):
-        """Verify save() does not swallow KeyboardInterrupt (BaseException)."""
+    def test_save_cleans_up_temp_file_on_keyboard_interrupt(self, tmp_path):
+        """Verify save() cleans up the temp file and re-raises KeyboardInterrupt."""
         fake_auth_file = tmp_path / "auth.json"
         fake_config_dir = tmp_path
         with patch.object(speechify_config, "AUTH_FILE", fake_auth_file), \
@@ -241,6 +241,9 @@ class TestConfigLoad:
              patch("json.dump", side_effect=KeyboardInterrupt):
             with pytest.raises(KeyboardInterrupt):
                 speechify_config.save({"key": "val"})
+        # The temp file should have been cleaned up by the BaseException handler
+        remaining = list(tmp_path.glob("*.tmp"))
+        assert remaining == [], f"Temp files not cleaned up: {remaining}"
 
 
 # ---------------------------------------------------------------------------
