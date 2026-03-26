@@ -16,7 +16,6 @@ from speechify_add.cli import (
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
-import importlib
 import sys
 import types
 
