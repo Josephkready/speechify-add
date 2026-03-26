@@ -412,7 +412,7 @@ async def _do_progress_batch(batch_json: str | None, batch_file: str | None):
     from . import verify as verify_module
 
     if batch_file:
-        with open(batch_file) as f:
+        with open(batch_file, encoding="utf-8") as f:
             items = _json.load(f)
     else:
         items = _json.loads(batch_json)
