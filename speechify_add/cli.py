@@ -448,7 +448,7 @@ async def _do_progress_single(query: str) -> int | None:
 
 
 async def _do_progress_batch(items: list[dict]) -> list[dict]:
-    """Look up listen progress for multiple items in a single browser session."""
+    """Look up listen progress for multiple items, searching the library for each."""
     from . import verify as verify_module
 
     output = []
