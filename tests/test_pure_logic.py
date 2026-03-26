@@ -137,6 +137,17 @@ class TestCollectUrls:
         result = _collect_urls(None, str(url_file), False)
         assert result == []
 
+    def test_from_file_skips_indented_comments(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text(
+            "https://example.com/a\n"
+            "  # indented comment\n"
+            "\t# tab-indented comment\n"
+            "https://example.com/b\n"
+        )
+        result = _collect_urls(None, str(url_file), False)
+        assert result == ["https://example.com/a", "https://example.com/b"]
+
 
 # ---------------------------------------------------------------------------
 # 5. _extract_title_from_text
