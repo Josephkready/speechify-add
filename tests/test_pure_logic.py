@@ -16,6 +16,7 @@ from speechify_add.cli import (
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
+from speechify_add.verify import parse_progress_pct
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +225,84 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+
+# ---------------------------------------------------------------------------
+# 8. parse_progress_pct
+# ---------------------------------------------------------------------------
+
+class TestParseProgressPct:
+    def test_typical_web_item(self):
+        assert parse_progress_pct("73% · web") == 73
+
+    def test_zero_percent(self):
+        assert parse_progress_pct("0% · pdf") == 0
+
+    def test_hundred_percent(self):
+        assert parse_progress_pct("100% · txt") == 100
+
+    def test_no_percentage(self):
+        assert parse_progress_pct("no progress here") is None
+
+    def test_empty_string(self):
+        assert parse_progress_pct("") is None
+
+    def test_multiple_percentages_returns_first(self):
+        assert parse_progress_pct("50% done, 80% quality · web") == 50
+
+    def test_percentage_embedded_in_text(self):
+        assert parse_progress_pct("Listen progress: 42% · epub") == 42
+
+
+# ---------------------------------------------------------------------------
+# 9. _collect_urls edge cases
+# ---------------------------------------------------------------------------
+
+class TestCollectUrlsEdgeCases:
+    def test_comment_only_file(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text("# comment 1\n# comment 2\n")
+        result = _collect_urls(None, str(url_file), False)
+        assert result == []
+
+    def test_file_with_whitespace_around_urls(self, tmp_path):
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text("  https://example.com/a  \n  https://example.com/b  \n")
+        result = _collect_urls(None, str(url_file), False)
+        assert result == ["https://example.com/a", "https://example.com/b"]
+
+    def test_inline_comment_not_stripped(self, tmp_path):
+        """Lines starting with # are comments; inline # is kept as-is."""
+        url_file = tmp_path / "urls.txt"
+        url_file.write_text("https://example.com/a#section\n")
+        result = _collect_urls(None, str(url_file), False)
+        assert result == ["https://example.com/a#section"]
+
+
+# ---------------------------------------------------------------------------
+# 10. Batch progress JSON validation
+# ---------------------------------------------------------------------------
+
+class TestBatchProgressValidation:
+    def test_valid_batch_json_structure(self):
+        """Ensure _do_progress_batch validates required fields."""
+        import asyncio
+        from speechify_add.cli import _do_progress_batch
+
+        # Missing "title" field should raise BadParameter
+        with pytest.raises(click.BadParameter, match='missing required "title"'):
+            asyncio.run(_do_progress_batch('[{"id": "abc"}]', None))
+
+    def test_batch_non_array_raises(self):
+        import asyncio
+        from speechify_add.cli import _do_progress_batch
+
+        with pytest.raises(click.BadParameter, match="must be a JSON array"):
+            asyncio.run(_do_progress_batch('{"not": "an array"}', None))
+
+    def test_batch_non_object_item_raises(self):
+        import asyncio
+        from speechify_add.cli import _do_progress_batch
+
+        with pytest.raises(click.BadParameter, match="must be a JSON object"):
+            asyncio.run(_do_progress_batch('["just a string"]', None))

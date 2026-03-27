@@ -417,7 +417,15 @@ async def _do_progress_batch(batch_json: str | None, batch_file: str | None):
     else:
         items = _json.loads(batch_json)
 
-    titles = [item.get("title", "") for item in items]
+    if not isinstance(items, list):
+        raise click.BadParameter("Batch input must be a JSON array")
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise click.BadParameter(f"Batch item {i} must be a JSON object")
+        if "title" not in item:
+            raise click.BadParameter(f'Batch item {i} missing required "title" field')
+
+    titles = [item["title"] for item in items]
     pcts = await verify_module.search_library_batch(titles)
 
     output = [

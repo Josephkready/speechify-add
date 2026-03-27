@@ -11,6 +11,25 @@ import httpx
 
 from chrome_hub import async_new_page
 
+# Shared JS snippet to extract library items from the Speechify DOM.
+# Each item is a <button> whose innerText contains a percentage and a type tag.
+_EXTRACT_ITEMS_JS = """
+    () => {
+        const results = [];
+        for (const btn of document.querySelectorAll('button')) {
+            const text = btn.innerText?.trim();
+            if (text && /\\d+%/.test(text) && /(web|pdf|txt|epub|mp3)/.test(text)) {
+                const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
+                results.push({
+                    title: lines[0] || '',
+                    meta: lines.slice(1).join(' · ')
+                });
+            }
+        }
+        return results;
+    }
+"""
+
 
 async def search_library(query: str) -> list[dict]:
     """
@@ -36,23 +55,7 @@ async def search_library(query: str) -> list[dict]:
         await page.wait_for_timeout(2_000)  # wait for results to filter
 
         # Collect all visible library items
-        items = await page.evaluate("""
-            () => {
-                const results = [];
-                for (const btn of document.querySelectorAll('button')) {
-                    const text = btn.innerText?.trim();
-                    // Library items contain "0%" or "100%" progress + a type tag
-                    if (text && /\\d+%/.test(text) && /(web|pdf|txt|epub|mp3)/.test(text)) {
-                        const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
-                        results.push({
-                            title: lines[0] || '',
-                            meta: lines.slice(1).join(' · ')
-                        });
-                    }
-                }
-                return results;
-            }
-        """)
+        items = await page.evaluate(_EXTRACT_ITEMS_JS)
 
         return items
 
@@ -94,19 +97,7 @@ async def search_library_batch(queries: list[str]) -> list[int | None]:
             await search_input.fill(query)
             await page.wait_for_timeout(2_000)
 
-            items = await page.evaluate("""
-                () => {
-                    const results = [];
-                    for (const btn of document.querySelectorAll('button')) {
-                        const text = btn.innerText?.trim();
-                        if (text && /\\d+%/.test(text) && /(web|pdf|txt|epub|mp3)/.test(text)) {
-                            const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
-                            results.push({ title: lines[0] || '', meta: lines.slice(1).join(' · ') });
-                        }
-                    }
-                    return results;
-                }
-            """)
+            items = await page.evaluate(_EXTRACT_ITEMS_JS)
 
             if items:
                 pct = parse_progress_pct(items[0]["meta"])
