@@ -5,6 +5,8 @@ import base64
 import json
 import os
 import stat
+import sys
+import types
 from unittest.mock import patch
 
 import click
@@ -16,8 +18,6 @@ from speechify_add.cli import (
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
-import sys
-import types
 
 # verify.py and auth.py have top-level imports that may not be available
 # in the test environment (chrome_hub, playwright). Stub them before importing.
