@@ -7,6 +7,7 @@ import os
 import stat
 from unittest.mock import patch
 
+import asyncio
 import click
 import pytest
 
@@ -14,6 +15,7 @@ from speechify_add.api import _user_id_from_token
 from speechify_add.cli import (
     _parse_item_id, _is_google_doc, _google_doc_export_url,
     _collect_urls, _collect_text, _extract_title_from_text,
+    _do_progress_batch,
 )
 from speechify_add import config as speechify_config
 from speechify_add.verify import parse_progress_pct
@@ -259,18 +261,12 @@ class TestProgressBatchValidation:
     def test_non_list_raises(self):
         """Batch data that isn't a JSON array should be rejected."""
         with pytest.raises(click.BadParameter, match="must be a JSON array"):
-            from speechify_add.cli import _do_progress_batch
-            import asyncio
             asyncio.run(_do_progress_batch('{"not": "a list"}', None))
 
     def test_non_dict_item_raises(self):
         with pytest.raises(click.BadParameter, match="must be a JSON object"):
-            from speechify_add.cli import _do_progress_batch
-            import asyncio
             asyncio.run(_do_progress_batch('["just a string"]', None))
 
     def test_missing_title_raises(self):
         with pytest.raises(click.BadParameter, match="missing required 'title'"):
-            from speechify_add.cli import _do_progress_batch
-            import asyncio
             asyncio.run(_do_progress_batch('[{"id": "abc"}]', None))

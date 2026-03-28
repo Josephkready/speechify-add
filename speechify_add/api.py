@@ -13,6 +13,8 @@ import time
 import urllib.parse
 import uuid as _uuid
 
+import jwt
+
 import httpx
 
 from . import auth
@@ -128,7 +130,6 @@ async def _upload_empty(client: httpx.AsyncClient, id_token: str,
 def _user_id_from_token(id_token: str) -> str:
     """Decode the Firebase JWT payload and return the user_id (uid)."""
     try:
-        import jwt
         payload = jwt.decode(id_token, options={"verify_signature": False})
         uid = payload.get("user_id") or payload.get("sub")
         if not uid:
