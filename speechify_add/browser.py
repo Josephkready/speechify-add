@@ -256,85 +256,13 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
     Add raw text to Speechify via the "Paste Text" UI flow.
     Returns the Speechify document URL (e.g. https://app.speechify.com/item/<uuid>).
     """
-    async with async_new_page() as page:
-        await _init_speechify_page(page)
-
-        if debug:
-            await _save_screenshot(page, "text-01-page-loaded")
-
-        # Open "New" menu
-        await page.locator('[data-testid="sidebar-import-button"]').click()
-        await page.wait_for_timeout(600)
-
-        # Click "Paste Text"
-        await page.locator('[data-testid="library-menu-item-paste-text"]').click()
-        await page.wait_for_timeout(1_000)
-
-        if debug:
-            await _save_screenshot(page, "text-02-paste-text-modal")
-
-        # Fill title (optional) and text
-        if title:
-            await page.locator('input[placeholder="Optional"]').fill(title)
-        # Use React-compatible JS setter — .fill() times out on large text (>100K chars)
-        textarea = page.locator('textarea[placeholder="Type or paste text here"]')
-        await textarea.evaluate(
-            """(el, val) => {
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                setter.call(el, val);
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-            }""",
-            text,
-        )
-        await page.wait_for_timeout(500)
-
-        if debug:
-            await _save_screenshot(page, "text-03-filled")
-
-        # Click "Save File"
-        await page.locator('[data-testid="add-text-save-button"]').click()
-
-        # Wait for processing — page redirects to /item/<uuid> when done
-        doc_url = ""
-        for _ in range(30):
-            await page.wait_for_timeout(1_000)
-            if "/item/" in page.url:
-                doc_url = page.url
-                break
-
-        if not doc_url:
-            raise RuntimeError(
-                "Timed out waiting for Speechify to process the text. "
-                f"Final URL: {page.url}"
-            )
-
-        if debug:
-            await _save_screenshot(page, "text-04-done")
-
-        return doc_url
+    async with BrowserSession(debug=debug) as session:
+        return await session.add_text(text, title=title)
 
 
 async def add_url(url: str, debug: bool = False) -> None:
-    async with async_new_page() as page:
-        console_errors = []
-        page.on("pageerror", lambda err: console_errors.append(str(err)))
-
-        await _init_speechify_page(page)
-
-        if debug:
-            await _save_screenshot(page, "01-page-loaded")
-
-        await _perform_add(page, url, debug=debug)
-
-        # Confirm the app didn't crash (Next.js error overlay)
-        crashed = await page.locator("text=Application error").count()
-        if crashed > 0:
-            raise RuntimeError(
-                f"Speechify app crashed after Paste Link.\n"
-                f"Page errors: {console_errors[:3]}"
-            )
+    async with BrowserSession(debug=debug) as session:
+        await session.add_url(url)
 
 
 async def delete_item(item_id: str, debug: bool = False) -> None:

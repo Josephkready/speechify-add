@@ -16,6 +16,7 @@ from speechify_add.cli import (
     _collect_urls, _collect_text, _extract_title_from_text,
 )
 from speechify_add import config as speechify_config
+from speechify_add.verify import parse_progress_pct
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +225,52 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+
+# ---------------------------------------------------------------------------
+# 8. parse_progress_pct
+# ---------------------------------------------------------------------------
+
+class TestParseProgressPct:
+    def test_typical_percentage(self):
+        assert parse_progress_pct("73% · web") == 73
+
+    def test_zero_percent(self):
+        assert parse_progress_pct("0% · pdf") == 0
+
+    def test_hundred_percent(self):
+        assert parse_progress_pct("100% · txt") == 100
+
+    def test_no_percentage(self):
+        assert parse_progress_pct("no progress here") is None
+
+    def test_empty_string(self):
+        assert parse_progress_pct("") is None
+
+    def test_multiple_percentages_returns_first(self):
+        assert parse_progress_pct("50% · 100% · web") == 50
+
+
+# ---------------------------------------------------------------------------
+# 9. _do_progress_batch validation
+# ---------------------------------------------------------------------------
+
+class TestProgressBatchValidation:
+    def test_non_list_raises(self):
+        """Batch data that isn't a JSON array should be rejected."""
+        with pytest.raises(click.BadParameter, match="must be a JSON array"):
+            from speechify_add.cli import _do_progress_batch
+            import asyncio
+            asyncio.run(_do_progress_batch('{"not": "a list"}', None))
+
+    def test_non_dict_item_raises(self):
+        with pytest.raises(click.BadParameter, match="must be a JSON object"):
+            from speechify_add.cli import _do_progress_batch
+            import asyncio
+            asyncio.run(_do_progress_batch('["just a string"]', None))
+
+    def test_missing_title_raises(self):
+        with pytest.raises(click.BadParameter, match="missing required 'title'"):
+            from speechify_add.cli import _do_progress_batch
+            import asyncio
+            asyncio.run(_do_progress_batch('[{"id": "abc"}]', None))
