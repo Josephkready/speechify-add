@@ -11,10 +11,12 @@ import click
 import pytest
 
 from speechify_add.api import _user_id_from_token
+from speechify_add.auth import _redact_body, _redact_dict
 from speechify_add.cli import (
     _parse_item_id, _is_google_doc, _google_doc_export_url,
     _collect_urls, _collect_text, _extract_title_from_text,
 )
+from speechify_add.verify import parse_progress_pct
 from speechify_add import config as speechify_config
 
 
@@ -224,3 +226,81 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+
+# ---------------------------------------------------------------------------
+# 8. _redact_body and _redact_dict
+# ---------------------------------------------------------------------------
+
+class TestRedactDict:
+    def test_redacts_sensitive_keys(self):
+        data = {"idToken": "secret123", "name": "test"}
+        result = _redact_dict(data)
+        assert result["idToken"] == "<REDACTED>"
+        assert result["name"] == "test"
+
+    def test_redacts_nested_dicts(self):
+        data = {"outer": {"refreshToken": "tok123", "ok": True}}
+        result = _redact_dict(data)
+        assert result["outer"]["refreshToken"] == "<REDACTED>"
+        assert result["outer"]["ok"] is True
+
+    def test_case_insensitive_matching(self):
+        data = {"API_KEY": "abc", "Password": "xyz"}
+        result = _redact_dict(data)
+        assert result["API_KEY"] == "<REDACTED>"
+        assert result["Password"] == "<REDACTED>"
+
+    def test_preserves_non_sensitive_keys(self):
+        data = {"url": "https://example.com", "method": "POST"}
+        result = _redact_dict(data)
+        assert result == data
+
+
+class TestRedactBody:
+    def test_json_body_redaction(self):
+        body = '{"idToken": "eyJhbGc...", "userId": "user1"}'
+        result = _redact_body(body)
+        parsed = json.loads(result)
+        assert parsed["idToken"] == "<REDACTED>"
+        assert parsed["userId"] == "user1"
+
+    def test_form_encoded_redaction(self):
+        body = "grant_type=refresh_token&refresh_token=secret123"
+        result = _redact_body(body)
+        assert "secret123" not in result
+        assert "<REDACTED>" in result
+
+    def test_empty_body(self):
+        result = _redact_body("")
+        assert result == ""
+
+    def test_non_sensitive_json_unchanged(self):
+        body = '{"url": "https://example.com", "method": "POST"}'
+        result = _redact_body(body)
+        parsed = json.loads(result)
+        assert parsed["url"] == "https://example.com"
+
+
+# ---------------------------------------------------------------------------
+# 9. parse_progress_pct
+# ---------------------------------------------------------------------------
+
+class TestParseProgressPct:
+    def test_typical_progress(self):
+        assert parse_progress_pct("73% · web") == 73
+
+    def test_zero_percent(self):
+        assert parse_progress_pct("0% · pdf") == 0
+
+    def test_hundred_percent(self):
+        assert parse_progress_pct("100% · txt") == 100
+
+    def test_no_percentage(self):
+        assert parse_progress_pct("web · some text") is None
+
+    def test_empty_string(self):
+        assert parse_progress_pct("") is None
+
+    def test_multiple_percentages_returns_first(self):
+        assert parse_progress_pct("50% · 100% done") == 50

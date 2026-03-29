@@ -8,7 +8,6 @@ Add a URL to Speechify via the real API flow:
 This is the reliable, headless approach — no browser needed.
 """
 
-import base64
 import json
 import time
 import urllib.parse
@@ -117,7 +116,8 @@ async def _upload_empty(client: httpx.AsyncClient, id_token: str,
             f"{resp.text[:200]}"
         )
     data = resp.json()
-    token = data.get("downloadTokens")
+    raw_tokens = data.get("downloadTokens", "")
+    token = raw_tokens.split(",")[0] if isinstance(raw_tokens, str) and raw_tokens else None
     if not token:
         raise RuntimeError(
             f"Firebase Storage did not return a download token. Response: "
@@ -129,10 +129,8 @@ async def _upload_empty(client: httpx.AsyncClient, id_token: str,
 def _user_id_from_token(id_token: str) -> str:
     """Decode the Firebase JWT payload and return the user_id (uid)."""
     try:
-        payload_b64 = id_token.split(".")[1]
-        # JWT base64url — add padding
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        import jwt as pyjwt
+        payload = pyjwt.decode(id_token, options={"verify_signature": False})
         uid = payload.get("user_id") or payload.get("sub")
         if not uid:
             raise ValueError("no user_id/sub in JWT payload")

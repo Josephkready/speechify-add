@@ -125,6 +125,67 @@ async def _refresh_from_chrome_hub(data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Debug log redaction
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_KEYS = frozenset({
+    "token", "idtoken", "refreshtoken", "access_token", "refresh_token",
+    "id_token", "apikey", "api_key", "password", "secret", "credential",
+    "authorization", "accesstoken", "grant_type",
+})
+
+
+def _redact_body(body: str) -> str:
+    """Redact sensitive values from a request body (JSON or form-encoded)."""
+    import json as _json
+    from urllib.parse import parse_qs as _parse_qs
+
+    # Try JSON redaction first
+    try:
+        data = _json.loads(body)
+        if isinstance(data, dict):
+            return _json.dumps(_redact_dict(data))
+    except (ValueError, TypeError):
+        pass
+
+    # Try form-encoded redaction
+    if "=" in body and "&" in body or "token" in body.lower():
+        try:
+            pairs = _parse_qs(body, keep_blank_values=True)
+            redacted = {
+                k: (["<REDACTED>"] if k.lower() in _SENSITIVE_KEYS else v)
+                for k, v in pairs.items()
+            }
+            return "&".join(
+                f"{k}={v[0]}" for k, v in redacted.items()
+            )
+        except Exception:
+            pass
+
+    # Fall back to regex for anything else
+    return re.sub(
+        r'(?i)(["\']?)('
+        + "|".join(re.escape(k) for k in _SENSITIVE_KEYS)
+        + r')(\1\s*[:=]\s*["\']?)([^"\'&\s]{8,})(["\']?)',
+        r"\1\2\3<REDACTED>\5",
+        body,
+    )
+
+
+def _redact_dict(data: dict) -> dict:
+    """Recursively redact sensitive keys in a dictionary."""
+    result = {}
+    for k, v in data.items():
+        if k.lower().replace("-", "_") in _SENSITIVE_KEYS:
+            result[k] = "<REDACTED>"
+        elif isinstance(v, dict):
+            result[k] = _redact_dict(v)
+        else:
+            result[k] = v
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Supervised login + token capture
 # ---------------------------------------------------------------------------
 
@@ -226,15 +287,7 @@ async def setup():
             # Redact sensitive fields to avoid leaking tokens
             try:
                 body = req.post_data or ""
-                body_preview = body[:500]
-                for sensitive in ("token", "idToken", "refreshToken",
-                                  "access_token", "refresh_token"):
-                    if sensitive in body_preview:
-                        body_preview = re.sub(
-                            rf'"{sensitive}"\s*:\s*"[^"]*"',
-                            f'"{sensitive}": "<REDACTED>"',
-                            body_preview,
-                        )
+                body_preview = _redact_body(body[:500])
                 entry = {
                     "url": url,
                     "method": req.method,
