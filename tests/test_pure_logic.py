@@ -11,10 +11,12 @@ import click
 import pytest
 
 from speechify_add.api import _user_id_from_token
+from speechify_add.auth import _extract_firebase_tokens
 from speechify_add.cli import (
     _parse_item_id, _is_google_doc, _google_doc_export_url,
     _collect_urls, _collect_text, _extract_title_from_text,
 )
+from speechify_add.verify import parse_progress_pct
 from speechify_add import config as speechify_config
 
 
@@ -224,3 +226,95 @@ class TestConfigLoad:
             speechify_config.save({"new": True})
         data = json.loads(fake_auth_file.read_text())
         assert data == {"new": True}
+
+
+# ---------------------------------------------------------------------------
+# 8. parse_progress_pct
+# ---------------------------------------------------------------------------
+
+class TestParseProgressPct:
+    def test_normal_percentage(self):
+        assert parse_progress_pct("73% · web") == 73
+
+    def test_zero_percent(self):
+        assert parse_progress_pct("0% · pdf") == 0
+
+    def test_hundred_percent(self):
+        assert parse_progress_pct("100% · txt") == 100
+
+    def test_no_percentage_returns_none(self):
+        assert parse_progress_pct("web") is None
+
+    def test_empty_string_returns_none(self):
+        assert parse_progress_pct("") is None
+
+    def test_percentage_only(self):
+        assert parse_progress_pct("42%") == 42
+
+    def test_multiple_percentages_takes_first(self):
+        # re.search finds the first match
+        assert parse_progress_pct("10% · 90%") == 10
+
+
+# ---------------------------------------------------------------------------
+# 9. _extract_firebase_tokens
+# ---------------------------------------------------------------------------
+
+class TestExtractFirebaseTokens:
+    def test_extracts_api_key_and_tokens(self):
+        records = [{
+            "value": {
+                "apiKey": "AIzaSy-test-key",
+                "stsTokenManager": {
+                    "refreshToken": "refresh-tok-abc",
+                    "accessToken": "id-tok-xyz",
+                    "expirationTime": 1700000000000,
+                },
+            }
+        }]
+        captured: dict = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["firebase_api_key"] == "AIzaSy-test-key"
+        assert captured["refresh_token"] == "refresh-tok-abc"
+        assert captured["id_token"] == "id-tok-xyz"
+        assert captured["id_token_expires_at"] == 1700000000.0
+
+    def test_json_string_value_is_parsed(self):
+        import json as _json
+        value = _json.dumps({
+            "apiKey": "key-from-string",
+            "stsTokenManager": {"refreshToken": "rt-string"},
+        })
+        records = [{"value": value}]
+        captured: dict = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["firebase_api_key"] == "key-from-string"
+        assert captured["refresh_token"] == "rt-string"
+
+    def test_top_level_refresh_token_fallback(self):
+        records = [{"value": {"refreshToken": "top-level-rt"}}]
+        captured: dict = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured["refresh_token"] == "top-level-rt"
+
+    def test_empty_records_produces_empty_captured(self):
+        captured: dict = {}
+        _extract_firebase_tokens([], captured)
+        assert captured == {}
+
+    def test_does_not_overwrite_already_captured_values(self):
+        records = [
+            {"value": {"apiKey": "first-key", "stsTokenManager": {"refreshToken": "rt-1"}}},
+            {"value": {"apiKey": "second-key", "stsTokenManager": {"refreshToken": "rt-2"}}},
+        ]
+        captured: dict = {}
+        _extract_firebase_tokens(records, captured)
+        # First record wins — subsequent records don't overwrite
+        assert captured["firebase_api_key"] == "first-key"
+        assert captured["refresh_token"] == "rt-1"
+
+    def test_non_dict_value_is_skipped(self):
+        records = [{"value": 12345}, {"value": None}]
+        captured: dict = {}
+        _extract_firebase_tokens(records, captured)
+        assert captured == {}
