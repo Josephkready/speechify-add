@@ -27,7 +27,7 @@ from speechify_add.verify import parse_progress_pct
 
 def _make_jwt(payload: dict) -> str:
     def b64(d):
-        return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+        return base64.urlsafe_b64encode(json.dumps(d, separators=(',', ':')).encode()).rstrip(b"=").decode()
     return f"{b64({'alg': 'RS256'})}.{b64(payload)}.fakesig"
 
 
