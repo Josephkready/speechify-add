@@ -12,8 +12,10 @@ stored refresh token, without opening a browser.
 """
 
 import asyncio
+import json
 import re
 import time
+from urllib.parse import parse_qs
 
 import httpx
 
@@ -137,21 +139,18 @@ _SENSITIVE_KEYS = frozenset({
 
 def _redact_body(body: str) -> str:
     """Redact sensitive values from a request body (JSON or form-encoded)."""
-    import json as _json
-    from urllib.parse import parse_qs as _parse_qs
-
     # Try JSON redaction first
     try:
-        data = _json.loads(body)
+        data = json.loads(body)
         if isinstance(data, dict):
-            return _json.dumps(_redact_dict(data))
+            return json.dumps(_redact_dict(data))
     except (ValueError, TypeError):
         pass
 
     # Try form-encoded redaction
     if "=" in body and "&" in body or "token" in body.lower():
         try:
-            pairs = _parse_qs(body, keep_blank_values=True)
+            pairs = parse_qs(body, keep_blank_values=True)
             redacted = {
                 k: (["<REDACTED>"] if k.lower() in _SENSITIVE_KEYS else v)
                 for k, v in pairs.items()
