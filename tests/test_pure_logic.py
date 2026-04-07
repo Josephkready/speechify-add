@@ -280,8 +280,7 @@ class TestExtractFirebaseTokens:
         assert captured["id_token_expires_at"] == 1700000000.0
 
     def test_json_string_value_is_parsed(self):
-        import json as _json
-        value = _json.dumps({
+        value = json.dumps({
             "apiKey": "key-from-string",
             "stsTokenManager": {"refreshToken": "rt-string"},
         })
