@@ -1,13 +1,13 @@
 """
 Pure-logic unit tests — no network, no subprocess, no browser.
 """
+import asyncio
 import base64
 import json
 import os
 import stat
 from unittest.mock import patch
 
-import asyncio
 import click
 import pytest
 
