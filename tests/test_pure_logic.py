@@ -7,10 +7,13 @@ import os
 import stat
 from unittest.mock import patch
 
+import asyncio
+
 import click
 import pytest
 
 from speechify_add.api import _user_id_from_token
+from speechify_add.cli import _do_progress_batch
 from speechify_add.cli import (
     _parse_item_id, _is_google_doc, _google_doc_export_url,
     _collect_urls, _collect_text, _extract_title_from_text,
@@ -286,23 +289,14 @@ class TestCollectUrlsEdgeCases:
 class TestBatchProgressValidation:
     def test_valid_batch_json_structure(self):
         """Ensure _do_progress_batch validates required fields."""
-        import asyncio
-        from speechify_add.cli import _do_progress_batch
-
         # Missing "title" field should raise BadParameter
         with pytest.raises(click.BadParameter, match='missing required "title"'):
             asyncio.run(_do_progress_batch('[{"id": "abc"}]', None))
 
     def test_batch_non_array_raises(self):
-        import asyncio
-        from speechify_add.cli import _do_progress_batch
-
         with pytest.raises(click.BadParameter, match="must be a JSON array"):
             asyncio.run(_do_progress_batch('{"not": "an array"}', None))
 
     def test_batch_non_object_item_raises(self):
-        import asyncio
-        from speechify_add.cli import _do_progress_batch
-
         with pytest.raises(click.BadParameter, match="must be a JSON object"):
             asyncio.run(_do_progress_batch('["just a string"]', None))
