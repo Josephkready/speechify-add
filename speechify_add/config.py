@@ -28,5 +28,8 @@ def save(data: dict):
             json.dump(data, f, indent=2)
         os.replace(temp_path, AUTH_FILE)
     except BaseException:
-        os.unlink(temp_path)
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
         raise
