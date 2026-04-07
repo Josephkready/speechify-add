@@ -5,6 +5,7 @@ Uses the library's search feature to find items matching a query.
 If a URL is passed, fetches the page title to use as the search term.
 """
 
+import html
 import re
 
 import httpx
@@ -128,7 +129,7 @@ async def get_page_title(url: str) -> str | None:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             match = re.search(r"<title[^>]*>([^<]+)</title>", resp.text, re.IGNORECASE)
             if match:
-                return match.group(1).strip()
+                return html.unescape(match.group(1).strip())
     except Exception:
         pass
     return None
