@@ -133,7 +133,7 @@ async def _refresh_from_chrome_hub(data: dict) -> str:
 _SENSITIVE_KEYS = frozenset({
     "token", "idtoken", "refreshtoken", "access_token", "refresh_token",
     "id_token", "apikey", "api_key", "password", "secret", "credential",
-    "authorization", "accesstoken", "grant_type",
+    "authorization", "accesstoken", "grant_type", "session",
 })
 
 
