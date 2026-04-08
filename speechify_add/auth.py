@@ -305,7 +305,12 @@ async def setup():
         print(f"  ⚠  No candidate API requests captured.")
         print(f"     See {debug_log_path} for full log.")
 
-    config.save(captured)
+    # Merge with existing auth data so that a re-run (e.g. after a failed
+    # login attempt) never wipes previously valid tokens.  Freshly-captured
+    # values take precedence over whatever was stored before.
+    existing = config.load()
+    existing.update(captured)
+    config.save(existing)
     print(f"\n✓ Saved to {config.AUTH_FILE}")
     print(f"  Debug log: {debug_log_path}")
 
