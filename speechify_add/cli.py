@@ -389,9 +389,19 @@ def progress(title, batch_json, batch_file):
     Batch mode prints a JSON array: [{"id": "uuid", "listen_pct": 73}, ...]
     """
     if batch_json or batch_file:
-        _run(_do_progress_batch(batch_json, batch_file))
+        try:
+            _run(_do_progress_batch(batch_json, batch_file))
+        except Exception as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
     elif title:
-        _run(_do_progress_single(title))
+        try:
+            _run(_do_progress_single(title))
+        except SystemExit:
+            raise
+        except Exception as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
     else:
         click.echo("Provide a TITLE or use --batch / --batch-file", err=True)
         sys.exit(1)

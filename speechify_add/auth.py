@@ -270,9 +270,6 @@ async def setup():
         await ctx.close()
 
     # ── Analyse debug log to find the add-URL endpoint ───────────────────
-    import re as _re
-    import json as _json
-
     add_candidates = []
     try:
         with open(debug_log_path) as f:
@@ -288,7 +285,7 @@ async def setup():
                                             ":batchGet", ":listen")):
                     continue
                 # Skip single-letter Segment paths
-                if _re.search(r"/v\d+/[a-z]$", url):
+                if re.search(r"/v\d+/[a-z]$", url):
                     continue
                 add_candidates.append(entry)
     except FileNotFoundError:

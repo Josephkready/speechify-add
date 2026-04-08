@@ -57,7 +57,11 @@ class BrowserSession:
         self._page = await self._page_cm.__aenter__()
         self._page.on("pageerror", lambda err: self._console_errors.append(str(err)))
 
-        await _init_speechify_page(self._page)
+        try:
+            await _init_speechify_page(self._page)
+        except Exception:
+            await self._page_cm.__aexit__(None, None, None)
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -522,6 +526,8 @@ async def _click_first_visible(page, selectors, step, timeout=5_000):
 
 
 async def _find_first_visible(page, selectors, step, timeout=5_000):
+    if not selectors:
+        raise _StepSkipped(f"No visible element for '{step}'. Tried: {selectors}")
     per = max(500, timeout // len(selectors))
     for selector in selectors:
         try:
