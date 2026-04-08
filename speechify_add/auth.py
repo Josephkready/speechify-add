@@ -85,7 +85,7 @@ async def _refresh_from_chrome_hub(data: dict) -> str:
         raise RuntimeError(
             "Token refresh failed and chrome-hub is not installed. "
             "Run: speechify-add auth setup"
-        )
+        ) from None
 
     async with async_new_page() as page:
         await page.goto("https://app.speechify.com", wait_until="load", timeout=30_000)
