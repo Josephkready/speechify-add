@@ -73,6 +73,16 @@ class TestUploadEmpty:
             await api._upload_empty(client, "tok", "some/path")
 
     @pytest.mark.asyncio
+    async def test_comma_separated_download_tokens_uses_first(self):
+        """Firebase may return multiple comma-separated tokens; only the first is used."""
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.post.return_value = _mock_response(
+            200, json_body={"downloadTokens": "first-token,second-token,third-token"}
+        )
+        token = await api._upload_empty(client, "tok", "some/path")
+        assert token == "first-token"
+
+    @pytest.mark.asyncio
     async def test_upload_url_encodes_storage_path(self):
         """Verify the storage path is URL-encoded in the upload request."""
         client = AsyncMock(spec=httpx.AsyncClient)

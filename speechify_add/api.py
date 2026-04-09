@@ -122,7 +122,7 @@ async def _upload_empty(client: httpx.AsyncClient, id_token: str,
         raise RuntimeError(
             f"Firebase Storage returned non-JSON response: {resp.text[:200]}"
         )
-    token = data.get("downloadTokens")
+    token = data.get("downloadTokens", "").split(",")[0]
     if not token:
         raise RuntimeError(
             f"Firebase Storage did not return a download token. Response: "
