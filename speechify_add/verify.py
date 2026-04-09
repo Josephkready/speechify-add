@@ -127,7 +127,7 @@ async def get_page_title(url: str) -> str | None:
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            match = re.search(r"<title[^>]*>([^<]+)</title>", resp.text, re.IGNORECASE)
+            match = re.search(r"<title[^>]*>(.*?)</title>", resp.text, re.IGNORECASE | re.DOTALL)
             if match:
                 return html.unescape(match.group(1).strip())
     except Exception:

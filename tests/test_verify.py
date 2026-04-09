@@ -88,6 +88,13 @@ class TestGetPageTitle:
         assert result == "Upper Title"
 
     @pytest.mark.asyncio
+    async def test_multiline_title(self):
+        cm = _mock_httpx_client("<title>\n  Multiline Title\n</title>")
+        with patch("speechify_add.verify.httpx.AsyncClient", return_value=cm):
+            result = await get_page_title("https://example.com")
+        assert result == "Multiline Title"
+
+    @pytest.mark.asyncio
     async def test_returns_none_when_no_title_tag(self):
         cm = _mock_httpx_client("<html><body>No title here</body></html>")
         with patch("speechify_add.verify.httpx.AsyncClient", return_value=cm):
