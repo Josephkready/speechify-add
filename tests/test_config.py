@@ -113,6 +113,23 @@ class TestSave:
         file_mode = stat.S_IMODE(auth_file.stat().st_mode)
         assert file_mode == 0o600
 
+    def test_config_dir_permissions_are_0o700(self, tmp_path):
+        config_dir, auth_file = _patch_paths(tmp_path)
+        with patch.object(config, "CONFIG_DIR", config_dir), \
+             patch.object(config, "AUTH_FILE", auth_file):
+            config.save({"x": 1})
+        dir_mode = stat.S_IMODE(config_dir.stat().st_mode)
+        assert dir_mode == 0o700
+
+    def test_config_dir_chmod_applied_to_existing_dir(self, tmp_path):
+        config_dir, auth_file = _patch_paths(tmp_path)
+        config_dir.mkdir(parents=True, mode=0o755)
+        with patch.object(config, "CONFIG_DIR", config_dir), \
+             patch.object(config, "AUTH_FILE", auth_file):
+            config.save({"x": 1})
+        dir_mode = stat.S_IMODE(config_dir.stat().st_mode)
+        assert dir_mode == 0o700
+
     def test_no_temp_file_left_after_success(self, tmp_path):
         config_dir, auth_file = _patch_paths(tmp_path)
         with patch.object(config, "CONFIG_DIR", config_dir), \

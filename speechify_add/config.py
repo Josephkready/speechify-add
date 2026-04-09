@@ -18,7 +18,8 @@ def load() -> dict:
 
 
 def save(data: dict):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(CONFIG_DIR, 0o700)
     # Atomic write: create temp file with restricted permissions, then rename.
     # Avoids a TOCTOU race where auth.json is briefly world-readable.
     fd, temp_path = tempfile.mkstemp(dir=CONFIG_DIR, suffix=".tmp")
