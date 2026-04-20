@@ -224,6 +224,25 @@ class TestRefreshIdToken:
         mock_config.save.assert_called_once_with(data)
 
     @pytest.mark.asyncio
+    async def test_sends_referer_header(self):
+        """Firebase API key requires Referer: https://app.speechify.com/ to avoid 403."""
+        data = {"firebase_api_key": "k", "refresh_token": "old-rt"}
+        firebase_resp = {"id_token": "new-id", "refresh_token": "new-rt", "expires_in": "3600"}
+        mock_resp = self._make_httpx_response(200, firebase_resp)
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_resp)
+
+        with patch("speechify_add.auth.config"), \
+             patch("httpx.AsyncClient", return_value=mock_client):
+            await auth._refresh_id_token(data)
+
+        _, kwargs = mock_client.post.call_args
+        headers = kwargs.get("headers", {})
+        assert headers.get("Referer") == "https://app.speechify.com/"
+
+    @pytest.mark.asyncio
     async def test_preserves_old_refresh_token_if_not_in_response(self):
         data = {"firebase_api_key": "k", "refresh_token": "old-rt"}
         firebase_resp = {"id_token": "new-id", "expires_in": "3600"}
