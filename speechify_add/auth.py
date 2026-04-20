@@ -57,7 +57,7 @@ async def _refresh_id_token(data: dict) -> str:
         resp = await client.post(
             f"https://securetoken.googleapis.com/v1/token?key={api_key}",
             data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Referer": "https://app.speechify.com/"},
             timeout=15,
         )
         if resp.status_code in (400, 403):
