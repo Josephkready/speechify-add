@@ -166,6 +166,22 @@ speechify_add/
 
 ---
 
+## Tests
+
+Pure-logic tests run with no external services and no auth:
+
+```bash
+pytest -m "not live"
+```
+
+Live tests round-trip through the real Speechify backend (upload → search → delete). They require a working browser profile from `auth setup` and skip cleanup-protect — failures may leave a stray item in your library:
+
+```bash
+pytest -m live
+```
+
+---
+
 ## Disclaimer
 
 This tool uses Speechify's undocumented internal API. It is not affiliated with or endorsed by Speechify Inc. Use it for personal use with your own account. The API can change at any time without notice.
