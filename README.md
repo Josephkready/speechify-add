@@ -62,6 +62,17 @@ cat summary.txt | speechify-add text --stdin -t "Daily Summary"
 
 Returns the Speechify document URL on success. Handles large files (tested up to 700K chars).
 
+### Add a file (PDF / EPUB / HTML / TXT)
+
+Upload an actual file via Speechify's "Import file" flow — preserves images and formatting that the `text` command flattens away:
+
+```bash
+speechify-add file article.pdf -t "On Re-reading LOTR"
+speechify-add file book.epub
+```
+
+Supported extensions: `.pdf`, `.epub`, `.html`, `.htm`, `.txt`. The `--title` flag is best-effort: Speechify usually extracts the title from the file's own metadata (PDFs especially), and the import dialog may not expose a title field. Returns the Speechify document URL on success.
+
 ### Delete an item
 
 Remove an item from your Speechify library:
@@ -100,12 +111,32 @@ speechify-add auth refresh
 
 ---
 
+## Python API
+
+`speechify-add` is also importable from Python — useful for downstream pipelines (`medium-fetch`, `book-to-speechify`, `hn-digest`, …) that want to push content to Speechify without shelling out:
+
+```python
+from pathlib import Path
+from speechify_add import upload_text, upload_file, upload_url
+
+# Each call returns the Speechify item URL on success.
+url = upload_text("hello world", title="Test")
+url = upload_file(Path("article.pdf"), title="On Re-reading LOTR")
+url = upload_url("https://example.com/article")
+```
+
+All three are sync wrappers around the underlying async browser flows — they manage the event loop internally, so callers don't need to. Auth comes from the persistent browser profile created by `speechify-add auth setup`.
+
+`upload_url` returns an empty string if Speechify accepted the URL but didn't redirect to the item page within ~15 seconds (the URL was still queued — we just couldn't observe its id).
+
+---
+
 ## How It Works
 
 | Approach | Used by | How |
 |---|---|---|
 | **Consumer API** | `delete` | Direct HTTP calls to Speechify's Firebase Cloud Functions |
-| **Browser automation** | `add`, `text` | Drives headed Chromium via Playwright with a persistent login profile |
+| **Browser automation** | `add`, `text`, `file` | Drives headed Chromium via Playwright with a persistent login profile |
 
 The browser runs in headed mode (Speechify's clipboard API requires a visible window). On headless servers, Xvfb is used automatically as a virtual display.
 
@@ -115,10 +146,11 @@ The browser runs in headed mode (Speechify's clipboard API requires a visible wi
 
 ```
 speechify_add/
-  cli.py       # Click CLI (add, text, delete, verify, auth, debug)
+  __init__.py  # Public Python API (upload_text, upload_file, upload_url)
+  cli.py       # Click CLI (add, text, file, delete, verify, auth, debug)
   auth.py      # Firebase token capture, refresh, and storage
   api.py       # Direct API calls (add URL, delete item)
-  browser.py   # Playwright automation (add URL, add text)
+  browser.py   # Playwright automation (add URL, add text, add file)
   verify.py    # Library search via headless browser
   config.py    # Paths and configuration
 ```
@@ -129,6 +161,22 @@ speechify_add/
 |------|---------|
 | `auth.json` | Firebase refresh token and API key |
 | `browser-profile/` | Persistent Chromium profile (stays logged in) |
+
+---
+
+## Tests
+
+Pure-logic tests run with no external services and no auth:
+
+```bash
+pytest -m "not live"
+```
+
+Live tests round-trip through the real Speechify backend (upload → search → delete). They require a working browser profile from `auth setup`. Tests clean up after themselves in a `finally` block, but if a test crashes hard you may need to delete the stray item manually:
+
+```bash
+pytest -m live
+```
 
 ---
 

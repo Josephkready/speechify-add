@@ -12,6 +12,7 @@ Usage:
 import asyncio
 import re
 import sys
+from pathlib import Path
 
 import click
 import httpx
@@ -257,6 +258,31 @@ def _collect_text(file_path, from_stdin) -> str:
 async def _add_text(content: str, title: str) -> str:
     from . import browser
     return await browser.add_text(content, title=title)
+
+
+# ---------------------------------------------------------------------------
+# file command
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.option("--title", "-t", default="",
+              help="Title hint (best-effort; Speechify may use the file's own metadata)")
+def file(path, title):
+    """Upload a file (.pdf/.epub/.html/.htm/.txt) to your Speechify library.
+
+    Returns the Speechify document URL on success.
+
+    Example:
+      speechify-add file article.pdf -t "On Re-reading LOTR"
+    """
+    from . import browser
+    try:
+        doc_url = _run(browser.add_file(Path(path), title=title))
+        click.echo(doc_url)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
