@@ -17,6 +17,22 @@ from chrome_hub import async_new_page
 
 SCREENSHOT_DIR = Path.home() / ".config" / "speechify-add" / "debug-screenshots"
 
+SUPPORTED_FILE_EXTS = frozenset({".pdf", ".epub", ".html", ".htm", ".txt"})
+
+
+def _validate_file_path(path: Path) -> Path:
+    """Raise if `path` isn't a readable file with a Speechify-supported extension."""
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    if not path.is_file():
+        raise ValueError(f"Not a file: {path}")
+    if path.suffix.lower() not in SUPPORTED_FILE_EXTS:
+        supported = ", ".join(sorted(SUPPORTED_FILE_EXTS))
+        raise ValueError(
+            f"Unsupported file type: {path.suffix}. Supported: {supported}"
+        )
+    return path
+
 
 # ---------------------------------------------------------------------------
 # Helpers for page initialization
@@ -320,7 +336,14 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
         return doc_url
 
 
-async def add_url(url: str, debug: bool = False) -> None:
+async def add_url(url: str, debug: bool = False) -> str:
+    """Add a URL to Speechify via the Paste Link flow.
+
+    Returns the Speechify item URL if observable (page redirected to
+    /item/<uuid> within the timeout). Returns an empty string if Speechify
+    accepted the URL but didn't redirect — the URL was still queued, we just
+    couldn't observe its id.
+    """
     async with async_new_page() as page:
         console_errors = []
         page.on("pageerror", lambda err: console_errors.append(str(err)))
@@ -332,13 +355,99 @@ async def add_url(url: str, debug: bool = False) -> None:
 
         await _perform_add(page, url, debug=debug)
 
-        # Confirm the app didn't crash (Next.js error overlay)
         crashed = await page.locator("text=Application error").count()
         if crashed > 0:
             raise RuntimeError(
                 f"Speechify app crashed after Paste Link.\n"
                 f"Page errors: {console_errors[:3]}"
             )
+
+        try:
+            return await _wait_for_item_redirect(page, timeout_seconds=15)
+        except RuntimeError:
+            return ""
+
+
+async def add_file(path: Path, title: str = "", debug: bool = False) -> str:
+    """Upload a file (.pdf/.epub/.html/.txt) via Speechify's Import-file flow.
+
+    Returns the Speechify item URL on success.
+    """
+    path = _validate_file_path(Path(path))
+
+    async with async_new_page() as page:
+        await _init_speechify_page(page)
+
+        if debug:
+            await _save_screenshot(page, "file-01-page-loaded")
+
+        await page.locator('[data-testid="sidebar-import-button"]').click()
+        await page.wait_for_timeout(600)
+
+        if debug:
+            await _save_screenshot(page, "file-02-new-menu")
+
+        # Selectors for the Import-file menu item are best-effort: Speechify
+        # has not stabilized data-testids for this entry. The screenshot
+        # walkthrough (`speechify-add debug`) can be used to harvest the live
+        # one if these stop matching.
+        async with page.expect_file_chooser(timeout=10_000) as fc_info:
+            await _click_first_visible(page, [
+                '[data-testid="library-menu-item-import-file"]',
+                '[data-testid="library-menu-item-upload-file"]',
+                '[data-testid="library-menu-item-upload"]',
+                '[data-testid="library-menu-item-import"]',
+                '[data-testid="library-menu-item-file"]',
+                '[role="menuitem"]:has-text("Import file")',
+                '[role="menuitem"]:has-text("Upload file")',
+                '[role="menuitem"]:has-text("Import")',
+                '[role="menuitem"]:has-text("Upload")',
+            ], step="import-file menu item", timeout=8_000)
+        chooser = await fc_info.value
+        await chooser.set_files(str(path))
+
+        if debug:
+            await _save_screenshot(page, "file-03-after-set-files")
+
+        if title:
+            try:
+                title_input = await _find_first_visible(page, [
+                    'input[placeholder="Title"]',
+                    'input[placeholder*="title"]',
+                    'input[name="title"]',
+                    'input[placeholder="Optional"]',
+                ], step="title input (optional)", timeout=2_000)
+                await title_input.fill(title)
+            except _StepSkipped:
+                pass
+
+        try:
+            await _click_first_visible(page, [
+                '[data-testid="add-file-save-button"]',
+                'button:has-text("Save File")',
+                'button:has-text("Save")',
+                'button:has-text("Import")',
+                'button:has-text("Upload")',
+                'button[type="submit"]',
+            ], step="save-file button (optional)", timeout=3_000)
+        except _StepSkipped:
+            # Some flows auto-submit on file selection.
+            pass
+
+        # PDF/EPUB processing can take longer than text — bump the timeout.
+        return await _wait_for_item_redirect(page, timeout_seconds=120)
+
+
+async def _wait_for_item_redirect(page, timeout_seconds: int) -> str:
+    """Poll page.url once per second for `/item/<uuid>` and return it."""
+    for _ in range(timeout_seconds):
+        await page.wait_for_timeout(1_000)
+        if "/item/" in page.url:
+            return page.url
+    raise RuntimeError(
+        f"Timed out waiting for Speechify to process the upload. "
+        f"Final URL: {page.url}"
+    )
 
 
 async def delete_item(item_id: str, debug: bool = False) -> None:
