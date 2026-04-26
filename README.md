@@ -172,11 +172,20 @@ Pure-logic tests run with no external services and no auth:
 pytest -m "not live"
 ```
 
-Live tests round-trip through the real Speechify backend (upload → search → delete). They require a working browser profile from `auth setup`. Tests clean up after themselves in a `finally` block, but if a test crashes hard you may need to delete the stray item manually:
+Live tests round-trip through the real Speechify backend (upload → archive). They require a working browser profile from `auth setup` and `pip install -e .[dev]` for the PDF test and the `--forked` flag (reportlab + pytest-forked). Tests clean up after themselves in a `finally` block, but if a test crashes hard you may need to delete the stray item manually:
 
 ```bash
+# Recommended: one fresh process per test, sidesteps occasional
+# chrome-hub orphan-cleanup hangs when async_new_page() runs back-to-back.
+pytest -m live --forked
+
+# Or without forking (single process, faster but flakier on consecutive tests):
 pytest -m live
 ```
+
+**Run `pytest -m live --forked` before merging any change that touches the browser-automation flows in `browser.py` or `verify.py`.** Speechify's `data-testid` attributes are unstable; the live tests are our only guard against the DOM rotating out from under us.
+
+Set `--log-cli-level=DEBUG` to see per-step timing — `add_file` and `search_library` emit timestamps for `goto`, sidebar visibility, menu clicks, file-input attachment, and the `/item/<uuid>` redirect, so a slow run can be diagnosed without re-instrumentation.
 
 ---
 

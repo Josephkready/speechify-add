@@ -11,9 +11,13 @@ batch uploads don't re-navigate between items.
 """
 
 import asyncio
+import logging
+import time
 from pathlib import Path
 
 from chrome_hub import async_new_page
+
+log = logging.getLogger(__name__)
 
 SCREENSHOT_DIR = Path.home() / ".config" / "speechify-add" / "debug-screenshots"
 
@@ -40,12 +44,17 @@ def _validate_file_path(path: Path) -> Path:
 
 async def _init_speechify_page(page):
     """Navigate to Speechify and wait for the app to be ready."""
+    t0 = time.perf_counter()
     await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+    log.debug("init: page.goto(load) done in %.2fs", time.perf_counter() - t0)
+    t1 = time.perf_counter()
     await page.locator('[data-testid="sidebar-import-button"]').wait_for(
         state="visible", timeout=15_000
     )
+    log.debug("init: sidebar visible in %.2fs", time.perf_counter() - t1)
     await page.wait_for_timeout(1_000)
     _assert_logged_in(page)
+    log.debug("init: total %.2fs", time.perf_counter() - t0)
 
 
 # ---------------------------------------------------------------------------
@@ -369,80 +378,80 @@ async def add_url(url: str, debug: bool = False) -> str:
 
 
 async def add_file(path: Path, title: str = "", debug: bool = False) -> str:
-    """Upload a file (.pdf/.epub/.html/.txt) via Speechify's Import-file flow.
+    """Upload a file (.pdf/.epub/.html/.txt) via Speechify's Upload-File flow.
+
+    Speechify's "New → Upload File" entry doesn't open a native chooser;
+    it reveals a hidden ``<input type=file data-testid=library-dropzone-file-input>``
+    that we drive directly via ``page.set_input_files``. Title is set
+    post-upload via Speechify's own metadata extraction (no UI hook today).
 
     Returns the Speechify item URL on success.
     """
     path = _validate_file_path(Path(path))
+    size_kb = path.stat().st_size / 1024
+    log.debug("add_file: start path=%s size=%.1fKB title=%r", path, size_kb, title)
+    t0 = time.perf_counter()
 
     async with async_new_page() as page:
+        log.debug("add_file: got page in %.2fs", time.perf_counter() - t0)
+
+        t1 = time.perf_counter()
         await _init_speechify_page(page)
+        log.debug("add_file: speechify ready (%.2fs since page; %.2fs total)",
+                  time.perf_counter() - t1, time.perf_counter() - t0)
 
         if debug:
             await _save_screenshot(page, "file-01-page-loaded")
 
+        t2 = time.perf_counter()
         await page.locator('[data-testid="sidebar-import-button"]').click()
         await page.wait_for_timeout(600)
+        log.debug("add_file: clicked New (%.2fs)", time.perf_counter() - t2)
 
         if debug:
             await _save_screenshot(page, "file-02-new-menu")
 
-        # Selectors for the Import-file menu item are best-effort: Speechify
-        # has not stabilized data-testids for this entry. The screenshot
-        # walkthrough (`speechify-add debug`) can be used to harvest the live
-        # one if these stop matching.
-        async with page.expect_file_chooser(timeout=10_000) as fc_info:
-            await _click_first_visible(page, [
-                '[data-testid="library-menu-item-import-file"]',
-                '[data-testid="library-menu-item-upload-file"]',
-                '[data-testid="library-menu-item-upload"]',
-                '[data-testid="library-menu-item-import"]',
-                '[data-testid="library-menu-item-file"]',
-                '[role="menuitem"]:has-text("Import file")',
-                '[role="menuitem"]:has-text("Upload file")',
-                '[role="menuitem"]:has-text("Import")',
-                '[role="menuitem"]:has-text("Upload")',
-            ], step="import-file menu item", timeout=8_000)
-        chooser = await fc_info.value
-        await chooser.set_files(str(path))
+        t3 = time.perf_counter()
+        await page.locator('[data-testid="library-menu-item-upload-file"]').click()
+        await page.wait_for_timeout(800)
+        log.debug("add_file: clicked Upload File (%.2fs)", time.perf_counter() - t3)
 
         if debug:
-            await _save_screenshot(page, "file-03-after-set-files")
+            await _save_screenshot(page, "file-03-after-upload-file-click")
 
-        if title:
-            try:
-                title_input = await _find_first_visible(page, [
-                    'input[placeholder="Title"]',
-                    'input[placeholder*="title"]',
-                    'input[name="title"]',
-                    'input[placeholder="Optional"]',
-                ], step="title input (optional)", timeout=2_000)
-                await title_input.fill(title)
-            except _StepSkipped:
-                pass
+        t4 = time.perf_counter()
+        file_input = page.locator('[data-testid="library-dropzone-file-input"]')
+        await file_input.wait_for(state="attached", timeout=10_000)
+        await file_input.set_input_files(str(path))
+        log.debug("add_file: set_input_files done (%.2fs)", time.perf_counter() - t4)
 
-        try:
-            await _click_first_visible(page, [
-                '[data-testid="add-file-save-button"]',
-                'button:has-text("Save File")',
-                'button:has-text("Save")',
-                'button:has-text("Import")',
-                'button:has-text("Upload")',
-                'button[type="submit"]',
-            ], step="save-file button (optional)", timeout=3_000)
-        except _StepSkipped:
-            # Some flows auto-submit on file selection.
-            pass
+        if debug:
+            await _save_screenshot(page, "file-04-after-set-files")
 
         # PDF/EPUB processing can take longer than text — bump the timeout.
-        return await _wait_for_item_redirect(page, timeout_seconds=120)
+        # `title` is accepted for API compatibility but not yet plumbed
+        # through — the upload flow has no title field, and Speechify
+        # extracts its own from file metadata (PDFs especially). A
+        # post-upload rename via the item-page UI is a follow-up.
+        t5 = time.perf_counter()
+        doc_url = await _wait_for_item_redirect(page, timeout_seconds=180)
+        log.debug("add_file: redirect observed in %.2fs", time.perf_counter() - t5)
+        log.debug("add_file: TOTAL %.2fs -> %s", time.perf_counter() - t0, doc_url)
+        return doc_url
 
 
 async def _wait_for_item_redirect(page, timeout_seconds: int) -> str:
     """Poll page.url once per second for `/item/<uuid>` and return it."""
-    for _ in range(timeout_seconds):
+    t0 = time.perf_counter()
+    last_url = None
+    for i in range(timeout_seconds):
         await page.wait_for_timeout(1_000)
+        if page.url != last_url:
+            log.debug("wait_for_item_redirect: t=%ds url=%s", i + 1, page.url)
+            last_url = page.url
         if "/item/" in page.url:
+            log.debug("wait_for_item_redirect: hit /item/ after %.2fs",
+                      time.perf_counter() - t0)
             return page.url
     raise RuntimeError(
         f"Timed out waiting for Speechify to process the upload. "

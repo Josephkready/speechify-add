@@ -6,11 +6,15 @@ If a URL is passed, fetches the page title to use as the search term.
 """
 
 import html
+import logging
 import re
+import time
 
 import httpx
 
 from chrome_hub import async_new_page
+
+log = logging.getLogger(__name__)
 
 
 async def search_library(query: str) -> list[dict]:
@@ -18,16 +22,23 @@ async def search_library(query: str) -> list[dict]:
     Search the Speechify library for items matching `query`.
     Returns a list of matching items: [{"title": ..., "meta": ...}, ...]
     """
+    log.debug("search_library: query=%r", query)
+    t0 = time.perf_counter()
     async with async_new_page() as page:
-        await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+        log.debug("search_library: got page in %.2fs", time.perf_counter() - t0)
 
-        # Wait for the library to finish loading (real items, not skeletons)
+        t1 = time.perf_counter()
+        await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+        log.debug("search_library: page.goto done (%.2fs)", time.perf_counter() - t1)
+
+        t2 = time.perf_counter()
         await page.locator('[data-testid="sidebar-import-button"]').wait_for(
             state="visible", timeout=15_000
         )
         await page.wait_for_timeout(2_000)
+        log.debug("search_library: library ready (%.2fs)", time.perf_counter() - t2)
 
-        # Open the search bar
+        t3 = time.perf_counter()
         await page.locator('[data-testid="library-search-toggle-button"]').click()
         await page.wait_for_timeout(500)
 
@@ -35,6 +46,7 @@ async def search_library(query: str) -> list[dict]:
         await search_input.wait_for(state="visible", timeout=5_000)
         await search_input.fill(query)
         await page.wait_for_timeout(2_000)  # wait for results to filter
+        log.debug("search_library: search filled+filtered (%.2fs)", time.perf_counter() - t3)
 
         # Collect all visible library items
         items = await page.evaluate("""
