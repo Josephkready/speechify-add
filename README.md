@@ -111,8 +111,6 @@ speechify-add auth refresh
 
 ---
 
----
-
 ## Python API
 
 `speechify-add` is also importable from Python — useful for downstream pipelines (`medium-fetch`, `book-to-speechify`, `hn-digest`, …) that want to push content to Speechify without shelling out:
@@ -174,7 +172,7 @@ Pure-logic tests run with no external services and no auth:
 pytest -m "not live"
 ```
 
-Live tests round-trip through the real Speechify backend (upload → search → delete). They require a working browser profile from `auth setup` and skip cleanup-protect — failures may leave a stray item in your library:
+Live tests round-trip through the real Speechify backend (upload → search → delete). They require a working browser profile from `auth setup`. Tests clean up after themselves in a `finally` block, but if a test crashes hard you may need to delete the stray item manually:
 
 ```bash
 pytest -m live
