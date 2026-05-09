@@ -24,11 +24,26 @@ SCREENSHOT_DIR = Path.home() / ".config" / "speechify-add" / "debug-screenshots"
 
 SUPPORTED_FILE_EXTS = frozenset({".pdf", ".epub", ".html", ".htm", ".txt"})
 
-# Wait this long for the "Paste Text" menu item to become visible. The
-# implicit Playwright default (30s) was too tight: under load Speechify
-# rotates DOM and the menu item appears intermittently — see issue #39.
+# Wait this long for the "Paste Text" menu item to become visible (legacy
+# UI). The implicit Playwright default (30s) was too tight under load —
+# see issue #39.
 PASTE_TEXT_MENU_TIMEOUT_MS = 60_000
 
+# How long to wait for the new-UI toolbar button before falling back to
+# the legacy "+ New" menu flow. Short — if it's there, it's there.
+ADD_TEXT_BUTTON_TIMEOUT_MS = 5_000
+
+# New Speechify Library UI (issue #41): direct top-bar buttons replace
+# the old "+ New → Paste Text" dropdown. `add-text-button` is "Create
+# Note" and opens the same paste-text modal we already drive.
+ADD_TEXT_BUTTON_SELECTORS = [
+    '[data-testid="add-text-button"]',
+    'button:has-text("Create Note")',
+]
+
+# Legacy Speechify UI: "+ New" sidebar button opens a dropdown menu,
+# then a menu item opens the paste-text modal. Kept as a fallback during
+# rollout — sessions still on the old UI will hit this path.
 PASTE_TEXT_MENU_SELECTORS = [
     '[data-testid="library-menu-item-paste-text"]',
     '[role="menuitem"]:has-text("Paste Text")',
@@ -576,36 +591,68 @@ async def _add_text_with_cleanup(
     return doc_url
 
 
-async def _do_add_text(page, text: str, title: str = "", debug: bool = False) -> str:
-    """Drive the Paste Text modal end-to-end and return the /item/ URL.
+async def _open_paste_text_modal(page, debug: bool = False) -> str:
+    """Open the paste-text modal by whichever entry point Speechify is
+    serving this session. Returns the entry name used (``"toolbar"`` or
+    ``"menu"``). Raises ``_StepSkipped`` if neither flow finds the entry.
 
-    Raises ``RuntimeError`` if the menu item never appears or Speechify
-    never redirects to /item/<uuid> within the timeout. On menu-item
-    failure, dumps the page screenshot + HTML so we can see what changed.
+    Issue #41: Speechify is rolling out a redesigned Library UI. The new
+    flow has a top-bar ``[data-testid="add-text-button"]`` ("Create
+    Note") that opens the modal directly — no "+ New" step. The legacy
+    flow ("+ New" sidebar → ``library-menu-item-paste-text``) is kept
+    as a fallback for sessions still on the old UI during rollout.
     """
-    if debug:
-        await _save_screenshot(page, "text-01-before-new-menu")
-
-    # Open "New" menu
-    await page.locator('[data-testid="sidebar-import-button"]').click()
-    await page.wait_for_timeout(600)
-
-    # Click "Paste Text" — was previously a single bare locator.click() that
-    # used Playwright's implicit 30s timeout. Issue #39: this click times
-    # out roughly once per 20 uploads, and the retry path produced corrupt
-    # items. Use the same fallback-selector helper used elsewhere, with a
-    # generous timeout, and dump the DOM on failure.
+    # New UI first: a quick visibility check, then a single click.
     try:
         await _click_first_visible(
             page,
-            PASTE_TEXT_MENU_SELECTORS,
-            step="paste-text menu item",
-            timeout=PASTE_TEXT_MENU_TIMEOUT_MS,
+            ADD_TEXT_BUTTON_SELECTORS,
+            step="add-text toolbar button",
+            timeout=ADD_TEXT_BUTTON_TIMEOUT_MS,
         )
+        log.debug("paste-text: opened via add-text-button (new UI)")
+        return "toolbar"
     except _StepSkipped:
-        await _dump_failure(page, "paste-text-menu")
+        log.debug(
+            "paste-text: add-text-button not visible after %.1fs; "
+            "trying legacy '+ New' menu flow",
+            ADD_TEXT_BUTTON_TIMEOUT_MS / 1000,
+        )
+
+    # Legacy UI: open "+ New" dropdown, then click the Paste Text item.
+    # Only do the "+ New" click in this branch — on the new UI it opens
+    # an unrelated dialog (`aria-haspopup="dialog"`) which we don't want.
+    await page.locator('[data-testid="sidebar-import-button"]').click()
+    await page.wait_for_timeout(600)
+    await _click_first_visible(
+        page,
+        PASTE_TEXT_MENU_SELECTORS,
+        step="paste-text menu item",
+        timeout=PASTE_TEXT_MENU_TIMEOUT_MS,
+    )
+    log.debug("paste-text: opened via library-menu-item-paste-text (legacy UI)")
+    return "menu"
+
+
+async def _do_add_text(page, text: str, title: str = "", debug: bool = False) -> str:
+    """Drive the Paste Text modal end-to-end and return the /item/ URL.
+
+    Raises ``RuntimeError`` if neither entry point opens the modal or
+    Speechify never redirects to /item/<uuid> within the timeout. On
+    entry-point failure, dumps the page screenshot + HTML so we can see
+    what changed.
+    """
+    if debug:
+        await _save_screenshot(page, "text-01-before-entry")
+
+    try:
+        await _open_paste_text_modal(page, debug=debug)
+    except _StepSkipped:
+        await _dump_failure(page, "paste-text-entry")
         raise RuntimeError(
-            f"Paste Text menu item not visible after "
+            f"Could not open the Paste Text modal — neither the "
+            f"add-text-button toolbar (new UI) nor the '+ New' menu "
+            f"(legacy UI) responded within "
             f"{PASTE_TEXT_MENU_TIMEOUT_MS // 1000}s. DOM dumped to "
             f"{SCREENSHOT_DIR}. Speechify's UI may have changed."
         )

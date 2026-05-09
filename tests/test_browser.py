@@ -16,9 +16,13 @@ from speechify_add.browser import (
     _find_first_visible,
     _click_first_visible,
     _maybe_delete_partial_item,
+    _open_paste_text_modal,
     _verify_item_playable,
     _StepSkipped,
     BrowserSession,
+    ADD_TEXT_BUTTON_SELECTORS,
+    ADD_TEXT_BUTTON_TIMEOUT_MS,
+    PASTE_TEXT_MENU_SELECTORS,
     PASTE_TEXT_MENU_TIMEOUT_MS,
 )
 
@@ -767,3 +771,105 @@ class TestPasteTextMenuTimeout:
         """Issue #39: Playwright's implicit 30s click timeout was too tight.
         Ensure we use a generous explicit timeout."""
         assert PASTE_TEXT_MENU_TIMEOUT_MS >= 60_000
+
+
+# ---------------------------------------------------------------------------
+# 14. _open_paste_text_modal — entry-point selection (issue #41)
+# ---------------------------------------------------------------------------
+
+class TestOpenPasteTextModal:
+    """The new Speechify Library UI replaces the "+ New" dropdown with a
+    direct top-bar button. We try the new selector first; if it isn't
+    visible, we fall back to the legacy "+ New" → menu flow.
+    """
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_new_ui_first_skips_sidebar_click(self):
+        """When add-text-button is visible, we click it directly and
+        do NOT touch the legacy '+ New' sidebar button."""
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
+        sidebar_clicked = []
+
+        def locator_side_effect(selector):
+            m = MagicMock()
+            m.click = AsyncMock(
+                side_effect=lambda: sidebar_clicked.append(selector),
+            )
+            m.wait_for = AsyncMock()
+            m.first = m
+            return m
+
+        page.locator.side_effect = locator_side_effect
+
+        result = self._run(_open_paste_text_modal(page))
+        assert result == "toolbar"
+        # Must not have clicked the legacy "+ New" sidebar button
+        assert not any("sidebar-import-button" in s for s in sidebar_clicked)
+
+    def test_falls_back_to_legacy_when_toolbar_missing(self):
+        """When add-text-button never appears, we click '+ New' and
+        then the menu item — preserving compatibility with the old UI."""
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
+
+        clicked = []
+
+        def locator_side_effect(selector):
+            m = MagicMock()
+            # Hide all add-text-* selectors (new UI)
+            if any(s in selector for s in ("add-text-button", "Create Note")):
+                m.wait_for = AsyncMock(side_effect=Exception("not visible"))
+            else:
+                m.wait_for = AsyncMock()
+            m.click = AsyncMock(side_effect=lambda: clicked.append(selector))
+            m.first = m
+            return m
+
+        page.locator.side_effect = locator_side_effect
+
+        result = self._run(_open_paste_text_modal(page))
+        assert result == "menu"
+        assert any("sidebar-import-button" in s for s in clicked), \
+            f"Expected '+ New' click in legacy fallback, got: {clicked}"
+
+    def test_raises_step_skipped_when_neither_works(self):
+        """Both new and legacy entry points missing → raise _StepSkipped
+        so the caller dumps the DOM and surfaces a clear error."""
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
+
+        def locator_side_effect(selector):
+            m = MagicMock()
+            # Sidebar click works (no error), but every paste-text
+            # selector is invisible.
+            if "sidebar-import-button" in selector:
+                m.click = AsyncMock()
+                m.wait_for = AsyncMock()
+            else:
+                m.wait_for = AsyncMock(side_effect=Exception("not visible"))
+                m.click = AsyncMock()
+            m.first = m
+            return m
+
+        page.locator.side_effect = locator_side_effect
+
+        with pytest.raises(_StepSkipped):
+            self._run(_open_paste_text_modal(page))
+
+
+class TestEntryPointConstants:
+    def test_add_text_selectors_have_data_testid_first(self):
+        """The new-UI testid is the most reliable signal — try it first."""
+        assert ADD_TEXT_BUTTON_SELECTORS[0] == '[data-testid="add-text-button"]'
+
+    def test_add_text_timeout_is_short(self):
+        """The toolbar visibility check must fail fast so the legacy
+        fallback doesn't sit on it for 60s on every old-UI session."""
+        assert ADD_TEXT_BUTTON_TIMEOUT_MS <= 10_000
+
+    def test_paste_text_menu_selectors_kept(self):
+        """Legacy menu selectors must still be present for fallback."""
+        assert any("library-menu-item-paste-text" in s for s in PASTE_TEXT_MENU_SELECTORS)
