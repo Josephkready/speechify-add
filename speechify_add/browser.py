@@ -591,7 +591,7 @@ async def _add_text_with_cleanup(
     return doc_url
 
 
-async def _open_paste_text_modal(page, debug: bool = False) -> str:
+async def _open_paste_text_modal(page) -> str:
     """Open the paste-text modal by whichever entry point Speechify is
     serving this session. Returns the entry name used (``"toolbar"`` or
     ``"menu"``). Raises ``_StepSkipped`` if neither flow finds the entry.
@@ -646,7 +646,7 @@ async def _do_add_text(page, text: str, title: str = "", debug: bool = False) ->
         await _save_screenshot(page, "text-01-before-entry")
 
     try:
-        await _open_paste_text_modal(page, debug=debug)
+        await _open_paste_text_modal(page)
     except _StepSkipped:
         await _dump_failure(page, "paste-text-entry")
         raise RuntimeError(
