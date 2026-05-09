@@ -62,6 +62,8 @@ cat summary.txt | speechify-add text --stdin -t "Daily Summary"
 
 Returns the Speechify document URL on success. Handles large files (tested up to 700K chars).
 
+After the upload completes, `speechify-add` re-fetches the item page and confirms it isn't showing the "Oops, something went wrong" overlay before returning. If the item is in a half-state, the corrupt item is deleted and the command exits non-zero so a caller's retry path can run cleanly instead of getting back a URL that looks fine but is unplayable on mobile (issue #39).
+
 ### Add a file (PDF / EPUB / HTML / TXT)
 
 Upload an actual file via Speechify's "Import file" flow — preserves images and formatting that the `text` command flattens away:

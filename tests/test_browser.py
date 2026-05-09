@@ -12,10 +12,14 @@ import pytest_asyncio
 
 from speechify_add.browser import (
     _assert_logged_in,
+    _extract_item_id,
     _find_first_visible,
     _click_first_visible,
+    _maybe_delete_partial_item,
+    _verify_item_playable,
     _StepSkipped,
     BrowserSession,
+    PASTE_TEXT_MENU_TIMEOUT_MS,
 )
 
 
@@ -356,6 +360,8 @@ class TestBrowserSessionAddText:
     def test_returns_doc_url_when_redirected(self):
         """Returns the /item/ URL once page redirects there."""
         session = BrowserSession()
+        item_uuid = "abcdef01-2345-6789-abcd-ef0123456789"
+        item_url = f"https://app.speechify.com/item/{item_uuid}"
         page = _make_page(url="https://app.speechify.com")
         session._page = page
 
@@ -365,7 +371,7 @@ class TestBrowserSessionAddText:
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
-                page.url = "https://app.speechify.com/item/abc-123"
+                page.url = item_url
 
         page.wait_for_timeout = wait_for_timeout_side
         page.goto = AsyncMock()
@@ -376,6 +382,8 @@ class TestBrowserSessionAddText:
             m.click = AsyncMock()
             m.fill = AsyncMock()
             m.evaluate = AsyncMock()
+            # Verification step uses .count() to look for error-overlay text
+            m.count = AsyncMock(return_value=0)
             m.first = m
             return m
 
@@ -385,7 +393,7 @@ class TestBrowserSessionAddText:
             session.add_text("hello world")
         )
         assert "/item/" in result
-        assert result == "https://app.speechify.com/item/abc-123"
+        assert result == item_url
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +524,7 @@ class TestIntegrationBrowserSessionLifecycle:
             fill_calls = []
 
             async def wait_for_timeout_side(_ms):
-                page.url = "https://app.speechify.com/item/doc-999"
+                page.url = "https://app.speechify.com/item/abcdef01-2345-6789-abcd-ef0123456789"
 
             page.wait_for_timeout = wait_for_timeout_side
             page.goto = AsyncMock()
@@ -526,6 +534,8 @@ class TestIntegrationBrowserSessionLifecycle:
                 m.wait_for = AsyncMock()
                 m.click = AsyncMock()
                 m.evaluate = AsyncMock()
+                # Verification step uses .count() for error-overlay text
+                m.count = AsyncMock(return_value=0)
                 m.first = m
 
                 async def fill_side(val):
@@ -542,3 +552,218 @@ class TestIntegrationBrowserSessionLifecycle:
             assert any("My Custom Title" in v for _, v in title_fills)
 
         asyncio.get_event_loop().run_until_complete(run())
+
+
+# ---------------------------------------------------------------------------
+# 9. _extract_item_id — pure logic
+# ---------------------------------------------------------------------------
+
+class TestExtractItemId:
+    @pytest.mark.parametrize("url,expected", [
+        ("https://app.speechify.com/item/cff1772b-7603-4d46-966c-97b4b4566443",
+         "cff1772b-7603-4d46-966c-97b4b4566443"),
+        ("https://app.speechify.com/item/CFF1772B-7603-4D46-966C-97B4B4566443?x=1",
+         "CFF1772B-7603-4D46-966C-97B4B4566443"),
+        ("/item/cff1772b-7603-4d46-966c-97b4b4566443",
+         "cff1772b-7603-4d46-966c-97b4b4566443"),
+    ])
+    def test_extracts_uuid(self, url, expected):
+        assert _extract_item_id(url) == expected
+
+    @pytest.mark.parametrize("url", [
+        None,
+        "",
+        "https://app.speechify.com",
+        "https://app.speechify.com/library",
+        "https://app.speechify.com/item/not-a-uuid",
+        "https://app.speechify.com/item/abc-123",  # short fake form
+    ])
+    def test_returns_none_for_non_item_urls(self, url):
+        assert _extract_item_id(url) is None
+
+
+# ---------------------------------------------------------------------------
+# 10. _verify_item_playable — issue #39 core check
+# ---------------------------------------------------------------------------
+
+class TestVerifyItemPlayable:
+    _UUID = "cff1772b-7603-4d46-966c-97b4b4566443"
+    _ITEM_URL = f"https://app.speechify.com/item/{_UUID}"
+
+    def _make_page_with_overlay_count(self, count: int):
+        page = _make_page(url=self._ITEM_URL)
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        loc = MagicMock()
+        loc.count = AsyncMock(return_value=count)
+        page.locator = MagicMock(return_value=loc)
+        page.screenshot = AsyncMock()
+        page.content = AsyncMock(return_value="<html></html>")
+        return page
+
+    def test_raises_when_error_overlay_present(self):
+        """If 'something went wrong' is on the item page, the item is broken."""
+        page = self._make_page_with_overlay_count(1)
+        with pytest.raises(RuntimeError, match="error overlay"):
+            asyncio.get_event_loop().run_until_complete(
+                _verify_item_playable(page, self._ITEM_URL)
+            )
+
+    def test_does_not_raise_when_overlay_absent(self):
+        """No error overlay means the item is considered playable."""
+        page = self._make_page_with_overlay_count(0)
+        # Must not raise
+        asyncio.get_event_loop().run_until_complete(
+            _verify_item_playable(page, self._ITEM_URL)
+        )
+
+    def test_raises_when_url_is_not_item_url(self):
+        """Reject URLs that don't contain a Speechify item UUID."""
+        page = self._make_page_with_overlay_count(0)
+        with pytest.raises(RuntimeError, match="Not a Speechify item URL"):
+            asyncio.get_event_loop().run_until_complete(
+                _verify_item_playable(page, "https://app.speechify.com/library")
+            )
+
+    def test_navigates_to_item_when_page_elsewhere(self):
+        """If page is not on the item URL, we navigate there before checking."""
+        page = _make_page(url="https://app.speechify.com/library")
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        loc = MagicMock()
+        loc.count = AsyncMock(return_value=0)
+        page.locator = MagicMock(return_value=loc)
+
+        asyncio.get_event_loop().run_until_complete(
+            _verify_item_playable(page, self._ITEM_URL)
+        )
+        page.goto.assert_awaited_once()
+        called_url = page.goto.call_args[0][0]
+        assert self._UUID in called_url
+
+
+# ---------------------------------------------------------------------------
+# 11. _maybe_delete_partial_item — orphan cleanup
+# ---------------------------------------------------------------------------
+
+class TestMaybeDeletePartialItem:
+    def test_no_op_when_not_on_item_page(self):
+        """If page.url is not /item/<uuid>, do nothing (no exceptions)."""
+        page = _make_page(url="https://app.speechify.com/library")
+        with patch("speechify_add.browser._perform_delete", AsyncMock()) as pd:
+            asyncio.get_event_loop().run_until_complete(
+                _maybe_delete_partial_item(page)
+            )
+        pd.assert_not_awaited()
+
+    def test_calls_perform_delete_when_on_item_page(self):
+        """When stranded on /item/<uuid>, _perform_delete is invoked with that UUID."""
+        uuid = "cff1772b-7603-4d46-966c-97b4b4566443"
+        page = _make_page(url=f"https://app.speechify.com/item/{uuid}")
+        with patch("speechify_add.browser._perform_delete", AsyncMock()) as pd:
+            asyncio.get_event_loop().run_until_complete(
+                _maybe_delete_partial_item(page)
+            )
+        pd.assert_awaited_once()
+        assert pd.await_args[0][1] == uuid
+
+    def test_swallows_cleanup_errors(self):
+        """A failing cleanup must not raise — we're already in an error path."""
+        uuid = "cff1772b-7603-4d46-966c-97b4b4566443"
+        page = _make_page(url=f"https://app.speechify.com/item/{uuid}")
+        boom = AsyncMock(side_effect=RuntimeError("cleanup failed"))
+        with patch("speechify_add.browser._perform_delete", boom):
+            # Must not raise
+            asyncio.get_event_loop().run_until_complete(
+                _maybe_delete_partial_item(page)
+            )
+
+
+# ---------------------------------------------------------------------------
+# 12. BrowserSession.add_text — verify-and-cleanup path (issue #39)
+# ---------------------------------------------------------------------------
+
+class TestAddTextVerificationCleanup:
+    _UUID = "cff1772b-7603-4d46-966c-97b4b4566443"
+    _ITEM_URL = f"https://app.speechify.com/item/{_UUID}"
+
+    def test_verify_failure_triggers_delete_and_reraise(self):
+        """If verification raises, the corrupt item is deleted and the
+        original error is re-raised so the caller's retry runs cleanly."""
+        async def run():
+            session = BrowserSession()
+            page = _make_page(url=self._ITEM_URL)
+            session._page = page
+
+            with patch(
+                "speechify_add.browser._do_add_text",
+                AsyncMock(return_value=self._ITEM_URL),
+            ), patch(
+                "speechify_add.browser._verify_item_playable",
+                AsyncMock(side_effect=RuntimeError("error overlay shown")),
+            ), patch(
+                "speechify_add.browser._perform_delete", AsyncMock()
+            ) as pd:
+                with pytest.raises(RuntimeError, match="error overlay"):
+                    await session.add_text("hello", title="Hi")
+
+            pd.assert_awaited_once()
+            assert pd.await_args[0][1] == self._UUID
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_mid_flow_failure_triggers_orphan_cleanup(self):
+        """If the upload itself fails while page is on /item/<uuid>, the
+        partial item is cleaned up before re-raising."""
+        async def run():
+            session = BrowserSession()
+            # Simulate the page already redirected to the item URL when the
+            # error happened (the half-state described in issue #39).
+            page = _make_page(url=self._ITEM_URL)
+            session._page = page
+
+            with patch(
+                "speechify_add.browser._do_add_text",
+                AsyncMock(side_effect=RuntimeError("Save File click timed out")),
+            ), patch(
+                "speechify_add.browser._perform_delete", AsyncMock()
+            ) as pd:
+                with pytest.raises(RuntimeError, match="Save File"):
+                    await session.add_text("hello")
+
+            pd.assert_awaited_once()
+            assert pd.await_args[0][1] == self._UUID
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_mid_flow_failure_no_orphan_when_not_on_item(self):
+        """If the failure happened before any item was created, we don't
+        try to delete anything — there's no UUID to clean up."""
+        async def run():
+            session = BrowserSession()
+            page = _make_page(url="https://app.speechify.com")  # never redirected
+            session._page = page
+
+            with patch(
+                "speechify_add.browser._do_add_text",
+                AsyncMock(side_effect=RuntimeError("Paste Text menu missing")),
+            ), patch(
+                "speechify_add.browser._perform_delete", AsyncMock()
+            ) as pd:
+                with pytest.raises(RuntimeError, match="Paste Text"):
+                    await session.add_text("hello")
+
+            pd.assert_not_awaited()
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+
+# ---------------------------------------------------------------------------
+# 13. Paste Text menu uses the bumped timeout (issue #39 resilience)
+# ---------------------------------------------------------------------------
+
+class TestPasteTextMenuTimeout:
+    def test_timeout_constant_is_at_least_60s(self):
+        """Issue #39: Playwright's implicit 30s click timeout was too tight.
+        Ensure we use a generous explicit timeout."""
+        assert PASTE_TEXT_MENU_TIMEOUT_MS >= 60_000
