@@ -208,7 +208,7 @@ async def verify_item_url(
                 continue
             return True, (
                 f"body has {len(body)} chars of content "
-                f"(settled after {polls} poll(s))"
+                f"(settled after {polls} poll{'s' if polls != 1 else ''})"
             )
         return False, (
             f"item never became playable within {max_wait:.0f}s "
