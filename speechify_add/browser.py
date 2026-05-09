@@ -169,34 +169,8 @@ class BrowserSession:
         keeps the user's library clean and stops the caller's retry path
         from picking up an orphaned half-state item (issue #39).
         """
-        page = self._page
-        try:
-            doc_url = await _do_add_text(page, text, title=title, debug=self.debug)
-        except Exception:
-            await _maybe_delete_partial_item(page, debug=self.debug)
-            raise
-
-        try:
-            await _verify_item_playable(page, doc_url, debug=self.debug)
-        except Exception:
-            item_id = _extract_item_id(doc_url)
-            if item_id:
-                log.warning(
-                    "Speechify item %s failed verification; deleting half-state item",
-                    item_id,
-                )
-                try:
-                    await _perform_delete(page, item_id, debug=self.debug)
-                except Exception as cleanup_err:
-                    log.warning(
-                        "Cleanup of half-state item %s failed: %s",
-                        item_id, cleanup_err,
-                    )
-            raise
-
-        # Navigate back to library for the next operation
+        doc_url = await _add_text_with_cleanup(self._page, text, title, self.debug)
         await self._navigate_to_library()
-
         return doc_url
 
 
@@ -220,29 +194,7 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
         if debug:
             await _save_screenshot(page, "text-01-page-loaded")
 
-        try:
-            doc_url = await _do_add_text(page, text, title=title, debug=debug)
-        except Exception:
-            await _maybe_delete_partial_item(page, debug=debug)
-            raise
-
-        try:
-            await _verify_item_playable(page, doc_url, debug=debug)
-        except Exception:
-            item_id = _extract_item_id(doc_url)
-            if item_id:
-                log.warning(
-                    "Speechify item %s failed verification; deleting half-state item",
-                    item_id,
-                )
-                try:
-                    await _perform_delete(page, item_id, debug=debug)
-                except Exception as cleanup_err:
-                    log.warning(
-                        "Cleanup of half-state item %s failed: %s",
-                        item_id, cleanup_err,
-                    )
-            raise
+        doc_url = await _add_text_with_cleanup(page, text, title, debug)
 
         if debug:
             await _save_screenshot(page, "text-04-done")
@@ -590,6 +542,40 @@ async def _find_first_visible(page, selectors, step, timeout=5_000):
 # orphan-cleanup logic isn't duplicated in two places (issue #39).
 # ---------------------------------------------------------------------------
 
+async def _add_text_with_cleanup(
+    page, text: str, title: str, debug: bool
+) -> str:
+    """Run ``_do_add_text`` followed by ``_verify_item_playable``, deleting
+    any partial / half-state item before re-raising on failure (issue #39).
+    Shared by ``BrowserSession.add_text`` and the standalone ``add_text``.
+    """
+    try:
+        doc_url = await _do_add_text(page, text, title=title, debug=debug)
+    except Exception:
+        await _maybe_delete_partial_item(page, debug=debug)
+        raise
+
+    try:
+        await _verify_item_playable(page, doc_url, debug=debug)
+    except Exception:
+        item_id = _extract_item_id(doc_url)
+        if item_id:
+            log.warning(
+                "Speechify item %s failed verification; deleting half-state item",
+                item_id,
+            )
+            try:
+                await _perform_delete(page, item_id, debug=debug)
+            except Exception as cleanup_err:
+                log.warning(
+                    "Cleanup of half-state item %s failed: %s",
+                    item_id, cleanup_err,
+                )
+        raise
+
+    return doc_url
+
+
 async def _do_add_text(page, text: str, title: str = "", debug: bool = False) -> str:
     """Drive the Paste Text modal end-to-end and return the /item/ URL.
 
@@ -685,8 +671,6 @@ async def _verify_item_playable(page, item_url: str, debug: bool = False) -> Non
         await _save_screenshot(page, "verify-01-item-page")
 
     for phrase in ITEM_ERROR_PHRASES:
-        # Case-insensitive text match. We OR the phrases via Playwright's
-        # text= regex so a single .count() suffices.
         count = await page.locator(f"text=/{re.escape(phrase)}/i").count()
         if count > 0:
             await _dump_failure(page, f"verify-error-overlay-{item_id}")
