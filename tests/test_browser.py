@@ -17,7 +17,6 @@ from speechify_add.browser import (
     _click_first_visible,
     _maybe_delete_partial_item,
     _open_paste_text_modal,
-    _verify_item_playable,
     _StepSkipped,
     BrowserSession,
     ADD_TEXT_BUTTON_SELECTORS,
@@ -587,66 +586,6 @@ class TestExtractItemId:
 
 
 # ---------------------------------------------------------------------------
-# 10. _verify_item_playable — issue #39 core check
-# ---------------------------------------------------------------------------
-
-class TestVerifyItemPlayable:
-    _UUID = "cff1772b-7603-4d46-966c-97b4b4566443"
-    _ITEM_URL = f"https://app.speechify.com/item/{_UUID}"
-
-    def _make_page_with_overlay_count(self, count: int):
-        page = _make_page(url=self._ITEM_URL)
-        page.goto = AsyncMock()
-        page.wait_for_timeout = AsyncMock()
-        loc = MagicMock()
-        loc.count = AsyncMock(return_value=count)
-        page.locator = MagicMock(return_value=loc)
-        page.screenshot = AsyncMock()
-        page.content = AsyncMock(return_value="<html></html>")
-        return page
-
-    def test_raises_when_error_overlay_present(self):
-        """If 'something went wrong' is on the item page, the item is broken."""
-        page = self._make_page_with_overlay_count(1)
-        with pytest.raises(RuntimeError, match="error overlay"):
-            asyncio.get_event_loop().run_until_complete(
-                _verify_item_playable(page, self._ITEM_URL)
-            )
-
-    def test_does_not_raise_when_overlay_absent(self):
-        """No error overlay means the item is considered playable."""
-        page = self._make_page_with_overlay_count(0)
-        # Must not raise
-        asyncio.get_event_loop().run_until_complete(
-            _verify_item_playable(page, self._ITEM_URL)
-        )
-
-    def test_raises_when_url_is_not_item_url(self):
-        """Reject URLs that don't contain a Speechify item UUID."""
-        page = self._make_page_with_overlay_count(0)
-        with pytest.raises(RuntimeError, match="Not a Speechify item URL"):
-            asyncio.get_event_loop().run_until_complete(
-                _verify_item_playable(page, "https://app.speechify.com/library")
-            )
-
-    def test_navigates_to_item_when_page_elsewhere(self):
-        """If page is not on the item URL, we navigate there before checking."""
-        page = _make_page(url="https://app.speechify.com/library")
-        page.goto = AsyncMock()
-        page.wait_for_timeout = AsyncMock()
-        loc = MagicMock()
-        loc.count = AsyncMock(return_value=0)
-        page.locator = MagicMock(return_value=loc)
-
-        asyncio.get_event_loop().run_until_complete(
-            _verify_item_playable(page, self._ITEM_URL)
-        )
-        page.goto.assert_awaited_once()
-        called_url = page.goto.call_args[0][0]
-        assert self._UUID in called_url
-
-
-# ---------------------------------------------------------------------------
 # 11. _maybe_delete_partial_item — orphan cleanup
 # ---------------------------------------------------------------------------
 
@@ -684,37 +623,12 @@ class TestMaybeDeletePartialItem:
 
 
 # ---------------------------------------------------------------------------
-# 12. BrowserSession.add_text — verify-and-cleanup path (issue #39)
+# 12. BrowserSession.add_text — orphan-cleanup path (issue #39)
 # ---------------------------------------------------------------------------
 
 class TestAddTextVerificationCleanup:
     _UUID = "cff1772b-7603-4d46-966c-97b4b4566443"
     _ITEM_URL = f"https://app.speechify.com/item/{_UUID}"
-
-    def test_verify_failure_triggers_delete_and_reraise(self):
-        """If verification raises, the corrupt item is deleted and the
-        original error is re-raised so the caller's retry runs cleanly."""
-        async def run():
-            session = BrowserSession()
-            page = _make_page(url=self._ITEM_URL)
-            session._page = page
-
-            with patch(
-                "speechify_add.browser._do_add_text",
-                AsyncMock(return_value=self._ITEM_URL),
-            ), patch(
-                "speechify_add.browser._verify_item_playable",
-                AsyncMock(side_effect=RuntimeError("error overlay shown")),
-            ), patch(
-                "speechify_add.browser._perform_delete", AsyncMock()
-            ) as pd:
-                with pytest.raises(RuntimeError, match="error overlay"):
-                    await session.add_text("hello", title="Hi")
-
-            pd.assert_awaited_once()
-            assert pd.await_args[0][1] == self._UUID
-
-        asyncio.get_event_loop().run_until_complete(run())
 
     def test_mid_flow_failure_triggers_orphan_cleanup(self):
         """If the upload itself fails while page is on /item/<uuid>, the

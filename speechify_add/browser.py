@@ -52,14 +52,6 @@ PASTE_TEXT_MENU_SELECTORS = [
     'button:has-text("Paste text")',
 ]
 
-# Phrases Speechify renders inside a half-state item — confirmed user-facing
-# on mobile after a flaky paste-text upload (issue #39).
-ITEM_ERROR_PHRASES = (
-    "something went wrong",
-    "try again later",
-    "Oops",
-)
-
 _ITEM_ID_RE = re.compile(
     r"/item/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
     re.IGNORECASE,
@@ -198,10 +190,9 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
     Add raw text to Speechify via the "Paste Text" UI flow.
     Returns the Speechify document URL (e.g. https://app.speechify.com/item/<uuid>).
 
-    Verifies the resulting item is playable before returning so callers
-    don't get a URL that looks fine but renders "Oops, something went
-    wrong" on mobile. On any failure mid-flow, attempts to delete a
-    partial item if one was created (issue #39).
+    On any failure mid-flow, attempts to delete a partial item if one
+    was already created (URL is on /item/<uuid>) before re-raising
+    (issue #39).
     """
     async with async_new_page() as page:
         await _init_speechify_page(page)
@@ -553,42 +544,22 @@ async def _find_first_visible(page, selectors, step, timeout=5_000):
 
 # ---------------------------------------------------------------------------
 # Paste-text upload internals (shared by BrowserSession.add_text and the
-# standalone add_text). Pulled out so the resilience + verification +
-# orphan-cleanup logic isn't duplicated in two places (issue #39).
+# standalone add_text). Pulled out so the resilience + orphan-cleanup
+# logic isn't duplicated in two places (issue #39).
 # ---------------------------------------------------------------------------
 
 async def _add_text_with_cleanup(
     page, text: str, title: str, debug: bool
 ) -> str:
-    """Run ``_do_add_text`` followed by ``_verify_item_playable``, deleting
-    any partial / half-state item before re-raising on failure (issue #39).
-    Shared by ``BrowserSession.add_text`` and the standalone ``add_text``.
+    """Run ``_do_add_text``, deleting any partial item before re-raising
+    on failure (issue #39). Shared by ``BrowserSession.add_text`` and the
+    standalone ``add_text``.
     """
     try:
-        doc_url = await _do_add_text(page, text, title=title, debug=debug)
+        return await _do_add_text(page, text, title=title, debug=debug)
     except Exception:
         await _maybe_delete_partial_item(page, debug=debug)
         raise
-
-    try:
-        await _verify_item_playable(page, doc_url, debug=debug)
-    except Exception:
-        item_id = _extract_item_id(doc_url)
-        if item_id:
-            log.warning(
-                "Speechify item %s failed verification; deleting half-state item",
-                item_id,
-            )
-            try:
-                await _perform_delete(page, item_id, debug=debug)
-            except Exception as cleanup_err:
-                log.warning(
-                    "Cleanup of half-state item %s failed: %s",
-                    item_id, cleanup_err,
-                )
-        raise
-
-    return doc_url
 
 
 async def _open_paste_text_modal(page) -> str:
@@ -693,39 +664,6 @@ async def _do_add_text(page, text: str, title: str = "", debug: bool = False) ->
         "Timed out waiting for Speechify to process the text. "
         f"Final URL: {page.url}"
     )
-
-
-async def _verify_item_playable(page, item_url: str, debug: bool = False) -> None:
-    """Confirm the Speechify item at ``item_url`` is in a playable state.
-
-    Issue #39: a flaky paste-text upload occasionally produces an item URL
-    that looks valid but renders "Oops, something went wrong. Try again
-    later." in the mobile app. This helper navigates to the item page,
-    waits for it to render, and raises ``RuntimeError`` if the error
-    overlay is present — letting the caller's retry path run cleanly
-    instead of returning a corrupt URL.
-    """
-    item_id = _extract_item_id(item_url)
-    if not item_id:
-        raise RuntimeError(f"Not a Speechify item URL: {item_url}")
-
-    expected = f"https://app.speechify.com/item/{item_id}"
-    if not page.url.startswith(expected):
-        await page.goto(expected, wait_until="load", timeout=30_000)
-    await page.wait_for_timeout(2_000)
-
-    if debug:
-        await _save_screenshot(page, "verify-01-item-page")
-
-    for phrase in ITEM_ERROR_PHRASES:
-        count = await page.locator(f"text=/{re.escape(phrase)}/i").count()
-        if count > 0:
-            await _dump_failure(page, f"verify-error-overlay-{item_id}")
-            raise RuntimeError(
-                f"Speechify item {item_id} shows error overlay "
-                f"({phrase!r}) — half-state upload, will not be playable. "
-                f"URL: {item_url}"
-            )
 
 
 async def _maybe_delete_partial_item(page, debug: bool = False) -> None:
