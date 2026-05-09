@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from speechify_add.verify import get_page_title, parse_progress_pct, search_library_batch
+from speechify_add.verify import (
+    get_page_title,
+    parse_progress_pct,
+    search_library_batch,
+    verify_item_url,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +223,121 @@ class TestSearchLibraryBatchIntegration:
             results = await search_library_batch(["unread"])
         assert results == [0]
         assert results[0] is not None
+
+
+# ---------------------------------------------------------------------------
+# verify_item_url polling (issue #47)
+# ---------------------------------------------------------------------------
+
+def _mock_item_page_cm(*, url: str, body_sequence: list[str]):
+    """Make an async-context-manager that yields a page whose `evaluate(...)`
+    returns successive bodies from `body_sequence`. Lets us simulate "the page
+    starts with the Oops! overlay then settles to real content" scenarios.
+    """
+    page = MagicMock()
+    page.url = url
+    page.goto = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
+
+    # Each call to page.evaluate(...) returns the next body in the sequence.
+    # When the sequence is exhausted, repeat the last body forever (so a
+    # caller polling past the deadline sees the same final state).
+    iterator = iter(body_sequence)
+    last = body_sequence[-1] if body_sequence else ""
+
+    async def _eval(_js):
+        nonlocal last
+        try:
+            last = next(iterator)
+        except StopIteration:
+            pass
+        return last
+
+    page.evaluate = _eval
+
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=page)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    return cm, page
+
+
+class TestVerifyItemUrl:
+    UUID = "cff1772b-7603-4d46-966c-97b4b4566443"
+    GOOD_BODY = (
+        "Real Article Title\nShare\n\nA full body of meaningful content "
+        "going on for hundreds of characters because this is what a real "
+        "Speechify item page looks like with title, summary, and player "
+        "controls all rendered." * 2
+    )
+    OOPS_BODY = (
+        "Oops! Something went wrong\n\nRefresh the page or try again later.\n"
+        "\nReturn to My Library\nNeed help? Contact support"
+    )
+
+    @pytest.mark.asyncio
+    async def test_passes_immediately_for_settled_item(self):
+        """A healthy item returns True on the first poll."""
+        cm, _ = _mock_item_page_cm(
+            url=f"https://app.speechify.com/item/{self.UUID}",
+            body_sequence=[self.GOOD_BODY],
+        )
+        with patch("speechify_add.verify.async_new_page", return_value=cm):
+            ok, info = await verify_item_url(self.UUID, max_wait=10)
+        assert ok is True
+        assert "1 poll" in info  # settled on first poll
+
+    @pytest.mark.asyncio
+    async def test_settles_after_initial_oops(self):
+        """A fresh upload that briefly shows the Oops! overlay still passes
+        once the page settles within the budget (issue #47 core scenario)."""
+        cm, _ = _mock_item_page_cm(
+            url=f"https://app.speechify.com/item/{self.UUID}",
+            body_sequence=[
+                self.OOPS_BODY,           # poll 1: still rendering
+                self.OOPS_BODY,           # poll 2: still rendering
+                self.GOOD_BODY,           # poll 3: done
+            ],
+        )
+        with patch("speechify_add.verify.async_new_page", return_value=cm):
+            ok, info = await verify_item_url(self.UUID, max_wait=10)
+        assert ok is True
+        assert "3 poll" in info
+
+    @pytest.mark.asyncio
+    async def test_settles_after_short_body(self):
+        """Same idea but the partial state is a near-empty body, not the
+        Oops! overlay."""
+        cm, _ = _mock_item_page_cm(
+            url=f"https://app.speechify.com/item/{self.UUID}",
+            body_sequence=["…", "loading…", self.GOOD_BODY],
+        )
+        with patch("speechify_add.verify.async_new_page", return_value=cm):
+            ok, info = await verify_item_url(self.UUID, max_wait=10)
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_fails_when_overlay_persists(self):
+        """A truly missing item shows the Oops! overlay across every poll —
+        we should fail with a clear message after the deadline."""
+        cm, _ = _mock_item_page_cm(
+            url=f"https://app.speechify.com/item/{self.UUID}",
+            body_sequence=[self.OOPS_BODY],  # repeats forever
+        )
+        with patch("speechify_add.verify.async_new_page", return_value=cm):
+            ok, info = await verify_item_url(self.UUID, max_wait=4)
+        assert ok is False
+        assert "Oops" in info
+        assert "never became playable" in info
+
+    @pytest.mark.asyncio
+    async def test_fails_when_redirected_away(self):
+        """If the page redirects away from /item/<uuid> (e.g. to /login),
+        bail immediately."""
+        cm, _ = _mock_item_page_cm(
+            url="https://app.speechify.com/login",
+            body_sequence=["irrelevant"],
+        )
+        with patch("speechify_add.verify.async_new_page", return_value=cm):
+            ok, info = await verify_item_url(self.UUID, max_wait=10)
+        assert ok is False
+        assert "redirected" in info.lower()

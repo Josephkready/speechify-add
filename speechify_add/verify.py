@@ -146,7 +146,22 @@ async def search_library_batch(queries: list[str]) -> list[int | None]:
 _ITEM_NOT_FOUND_PHRASE = "Oops! Something went wrong"
 
 
-async def verify_item_url(item_id: str) -> tuple[bool, str]:
+# Minimum body length we treat as "real content" on an item page. The
+# "Oops! Something went wrong" stub is ~113 chars; legitimate items are
+# 1000+ chars (title + summary + player UI text).
+_PLAYABLE_MIN_BODY_CHARS = 200
+
+# How long verify_item_url polls before giving up. Issue #47: the page
+# can briefly render the "Oops!" overlay or a near-empty body for ~20s
+# right after upload while Speechify finalizes the item server-side.
+_VERIFY_ITEM_MAX_WAIT_SEC = 30.0
+# Interval between polls within that window.
+_VERIFY_ITEM_POLL_INTERVAL_SEC = 2.0
+
+
+async def verify_item_url(
+    item_id: str, *, max_wait: float = _VERIFY_ITEM_MAX_WAIT_SEC,
+) -> tuple[bool, str]:
     """Confirm the Speechify item at /item/<item_id> renders real content.
 
     Returns ``(ok, message)``. This is the reliable verification path for
@@ -155,29 +170,50 @@ async def verify_item_url(item_id: str) -> tuple[bool, str]:
     so a search by title can return zero matches for an item that
     actually exists. Going directly to the item URL bypasses the search
     layer entirely.
+
+    Issue #47: a fixed-wait probe races the post-upload render — fresh
+    items can briefly show the "Oops!" overlay or a near-empty body
+    before the page settles, especially under chrome-hub contention
+    when verify_uploads runs in parallel. We poll instead of waiting a
+    single fixed interval: healthy items pass on the first probe (~2s);
+    fresh ones get up to ``max_wait`` to settle; truly missing items
+    fail reliably because the overlay persists across every poll.
     """
     item_url = f"https://app.speechify.com/item/{item_id}"
-    log.debug("verify_item_url: %s", item_url)
+    log.debug("verify_item_url: %s (max_wait=%.0fs)", item_url, max_wait)
     async with async_new_page() as page:
         await page.goto(item_url, wait_until="load", timeout=30_000)
-        await page.wait_for_timeout(3_000)
-        if "/item/" not in page.url:
-            return False, (
-                f"redirected away from item page to {page.url} — "
-                "likely 404 / not logged in"
+        deadline = time.monotonic() + max_wait
+        last_reason = "no checks completed before deadline"
+        polls = 0
+        while time.monotonic() < deadline:
+            await page.wait_for_timeout(int(_VERIFY_ITEM_POLL_INTERVAL_SEC * 1000))
+            polls += 1
+            if "/item/" not in page.url:
+                return False, (
+                    f"redirected away from item page to {page.url} — "
+                    "likely 404 / not logged in"
+                )
+            body = await page.evaluate("() => document.body.innerText || ''")
+            if _ITEM_NOT_FOUND_PHRASE in body:
+                last_reason = (
+                    f"showing {_ITEM_NOT_FOUND_PHRASE!r} overlay "
+                    f"(poll {polls})"
+                )
+                continue
+            if len(body) < _PLAYABLE_MIN_BODY_CHARS:
+                last_reason = (
+                    f"body still only {len(body)} chars (poll {polls})"
+                )
+                continue
+            return True, (
+                f"body has {len(body)} chars of content "
+                f"(settled after {polls} poll{'s' if polls != 1 else ''})"
             )
-        body = await page.evaluate("() => document.body.innerText || ''")
-        if _ITEM_NOT_FOUND_PHRASE in body:
-            return False, (
-                f"page shows the {_ITEM_NOT_FOUND_PHRASE!r} overlay — "
-                "item does not exist or is inaccessible"
-            )
-        if len(body) < 200:
-            return False, (
-                f"body content is only {len(body)} chars — "
-                "item exists but appears empty / broken"
-            )
-        return True, f"body has {len(body)} chars of content"
+        return False, (
+            f"item never became playable within {max_wait:.0f}s "
+            f"({polls} polls; last: {last_reason})"
+        )
 
 
 async def get_page_title(url: str) -> str | None:
