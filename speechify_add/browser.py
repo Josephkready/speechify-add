@@ -12,6 +12,7 @@ batch uploads don't re-navigate between items.
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -22,6 +23,40 @@ log = logging.getLogger(__name__)
 SCREENSHOT_DIR = Path.home() / ".config" / "speechify-add" / "debug-screenshots"
 
 SUPPORTED_FILE_EXTS = frozenset({".pdf", ".epub", ".html", ".htm", ".txt"})
+
+# Wait this long for the "Paste Text" menu item to become visible. The
+# implicit Playwright default (30s) was too tight: under load Speechify
+# rotates DOM and the menu item appears intermittently — see issue #39.
+PASTE_TEXT_MENU_TIMEOUT_MS = 60_000
+
+PASTE_TEXT_MENU_SELECTORS = [
+    '[data-testid="library-menu-item-paste-text"]',
+    '[role="menuitem"]:has-text("Paste Text")',
+    '[role="menuitem"]:has-text("Paste text")',
+    'button:has-text("Paste Text")',
+    'button:has-text("Paste text")',
+]
+
+# Phrases Speechify renders inside a half-state item — confirmed user-facing
+# on mobile after a flaky paste-text upload (issue #39).
+ITEM_ERROR_PHRASES = (
+    "something went wrong",
+    "try again later",
+    "Oops",
+)
+
+_ITEM_ID_RE = re.compile(
+    r"/item/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def _extract_item_id(url: str | None) -> str | None:
+    """Return the Speechify item UUID from a URL, or None if absent."""
+    if not url:
+        return None
+    m = _ITEM_ID_RE.search(url)
+    return m.group(1) if m else None
 
 
 def _validate_file_path(path: Path) -> Path:
@@ -123,152 +158,41 @@ class BrowserSession:
 
     async def delete_item(self, item_id: str) -> None:
         """Delete an item from the Speechify library by its UUID."""
-        page = self._page
-
-        if self.debug:
-            await _save_screenshot(page, "delete-01-before")
-
-        # Navigate to the item page
-        await page.goto(
-            f"https://app.speechify.com/item/{item_id}",
-            wait_until="load",
-            timeout=60_000,
-        )
-        await page.wait_for_timeout(2_000)
-
-        if self.debug:
-            await _save_screenshot(page, "delete-02-item-page")
-
-        # Look for a three-dot / more menu button
-        try:
-            more_btn = await _find_first_visible(page, [
-                '[data-testid*="more"]',
-                '[data-testid*="menu"]',
-                '[aria-label*="More"]',
-                '[aria-label*="more"]',
-                '[aria-label*="Options"]',
-                '[aria-label*="options"]',
-                'button[aria-haspopup]',
-                'button[aria-haspopup="menu"]',
-                '[data-testid*="kebab"]',
-                '[data-testid*="ellipsis"]',
-            ], step="more/menu button", timeout=8_000)
-            await more_btn.click()
-            await page.wait_for_timeout(1_000)
-
-            if self.debug:
-                await _save_screenshot(page, "delete-03-menu-open")
-        except _StepSkipped:
-            # No menu button found — delete button might be directly visible
-            pass
-
-        # Click the delete/remove option
-        await _click_first_visible(page, [
-            '[data-testid*="delete"]',
-            '[data-testid*="Delete"]',
-            '[data-testid*="trash"]',
-            '[data-testid*="remove"]',
-            'button:has-text("Delete")',
-            'button:has-text("Remove")',
-            '[role="menuitem"]:has-text("Delete")',
-            '[role="menuitem"]:has-text("Remove")',
-            'a:has-text("Delete")',
-            'div:has-text("Delete"):not(:has(div:has-text("Delete")))',
-        ], step="delete button", timeout=8_000)
-        await page.wait_for_timeout(1_000)
-
-        if self.debug:
-            await _save_screenshot(page, "delete-04-after-delete-click")
-
-        # Handle confirmation dialog if one appears
-        try:
-            await _click_first_visible(page, [
-                '[data-testid*="confirm"]',
-                '[data-testid*="delete-confirm"]',
-                'button:has-text("Delete")',
-                'button:has-text("Confirm")',
-                'button:has-text("Yes")',
-                '[role="dialog"] button:has-text("Delete")',
-                '[role="dialog"] button:has-text("Confirm")',
-                '[role="alertdialog"] button:has-text("Delete")',
-            ], step="confirm deletion", timeout=5_000)
-        except _StepSkipped:
-            # No confirmation dialog — deletion may have proceeded directly
-            pass
-
-        await page.wait_for_timeout(2_000)
-
-        if self.debug:
-            await _save_screenshot(page, "delete-05-done")
-
-        # Verify we got redirected back to library (or item is gone)
-        # The page should no longer be on the item URL
-        if f"/item/{item_id}" in page.url:
-            # Check if there's an error or "not found" indicator
-            not_found = await page.locator("text=not found").count()
-            gone = await page.locator("text=deleted").count()
-            if not_found == 0 and gone == 0:
-                raise RuntimeError(
-                    f"Deletion may have failed — still on item page: {page.url}"
-                )
-
-        # Navigate back to library for any subsequent operations
+        await _perform_delete(self._page, item_id, debug=self.debug)
         await self._navigate_to_library()
 
     async def add_text(self, text: str, title: str = "") -> str:
-        """Add raw text via the Paste Text flow, reusing the open browser."""
+        """Add raw text via the Paste Text flow, reusing the open browser.
+
+        On any failure mid-flow, attempts to delete a partial item if one was
+        already created (URL is on /item/<uuid>) before re-raising — this
+        keeps the user's library clean and stops the caller's retry path
+        from picking up an orphaned half-state item (issue #39).
+        """
         page = self._page
+        try:
+            doc_url = await _do_add_text(page, text, title=title, debug=self.debug)
+        except Exception:
+            await _maybe_delete_partial_item(page, debug=self.debug)
+            raise
 
-        if self.debug:
-            await _save_screenshot(page, "batch-text-01-before")
-
-        # Open "New" menu
-        await page.locator('[data-testid="sidebar-import-button"]').click()
-        await page.wait_for_timeout(600)
-
-        # Click "Paste Text"
-        await page.locator('[data-testid="library-menu-item-paste-text"]').click()
-        await page.wait_for_timeout(1_000)
-
-        if self.debug:
-            await _save_screenshot(page, "batch-text-02-modal")
-
-        # Fill title and text
-        if title:
-            await page.locator('input[placeholder="Optional"]').fill(title)
-        # Use React-compatible JS setter — .fill() times out on large text (>100K chars)
-        textarea = page.locator('textarea[placeholder="Type or paste text here"]')
-        await textarea.evaluate(
-            """(el, val) => {
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                setter.call(el, val);
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-            }""",
-            text,
-        )
-        await page.wait_for_timeout(500)
-
-        # Click "Save File"
-        await page.locator('[data-testid="add-text-save-button"]').click()
-
-        # Wait for redirect to /item/<uuid>
-        doc_url = ""
-        for _ in range(30):
-            await page.wait_for_timeout(1_000)
-            if "/item/" in page.url:
-                doc_url = page.url
-                break
-
-        if not doc_url:
-            raise RuntimeError(
-                "Timed out waiting for Speechify to process the text. "
-                f"Final URL: {page.url}"
-            )
-
-        if self.debug:
-            await _save_screenshot(page, "batch-text-03-done")
+        try:
+            await _verify_item_playable(page, doc_url, debug=self.debug)
+        except Exception:
+            item_id = _extract_item_id(doc_url)
+            if item_id:
+                log.warning(
+                    "Speechify item %s failed verification; deleting half-state item",
+                    item_id,
+                )
+                try:
+                    await _perform_delete(page, item_id, debug=self.debug)
+                except Exception as cleanup_err:
+                    log.warning(
+                        "Cleanup of half-state item %s failed: %s",
+                        item_id, cleanup_err,
+                    )
+            raise
 
         # Navigate back to library for the next operation
         await self._navigate_to_library()
@@ -284,6 +208,11 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
     """
     Add raw text to Speechify via the "Paste Text" UI flow.
     Returns the Speechify document URL (e.g. https://app.speechify.com/item/<uuid>).
+
+    Verifies the resulting item is playable before returning so callers
+    don't get a URL that looks fine but renders "Oops, something went
+    wrong" on mobile. On any failure mid-flow, attempts to delete a
+    partial item if one was created (issue #39).
     """
     async with async_new_page() as page:
         await _init_speechify_page(page)
@@ -291,53 +220,29 @@ async def add_text(text: str, title: str = "", debug: bool = False) -> str:
         if debug:
             await _save_screenshot(page, "text-01-page-loaded")
 
-        # Open "New" menu
-        await page.locator('[data-testid="sidebar-import-button"]').click()
-        await page.wait_for_timeout(600)
+        try:
+            doc_url = await _do_add_text(page, text, title=title, debug=debug)
+        except Exception:
+            await _maybe_delete_partial_item(page, debug=debug)
+            raise
 
-        # Click "Paste Text"
-        await page.locator('[data-testid="library-menu-item-paste-text"]').click()
-        await page.wait_for_timeout(1_000)
-
-        if debug:
-            await _save_screenshot(page, "text-02-paste-text-modal")
-
-        # Fill title (optional) and text
-        if title:
-            await page.locator('input[placeholder="Optional"]').fill(title)
-        # Use React-compatible JS setter — .fill() times out on large text (>100K chars)
-        textarea = page.locator('textarea[placeholder="Type or paste text here"]')
-        await textarea.evaluate(
-            """(el, val) => {
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                setter.call(el, val);
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-            }""",
-            text,
-        )
-        await page.wait_for_timeout(500)
-
-        if debug:
-            await _save_screenshot(page, "text-03-filled")
-
-        # Click "Save File"
-        await page.locator('[data-testid="add-text-save-button"]').click()
-
-        # Wait for processing — page redirects to /item/<uuid> when done
-        doc_url = ""
-        for _ in range(30):
-            await page.wait_for_timeout(1_000)
-            if "/item/" in page.url:
-                doc_url = page.url
-                break
-
-        if not doc_url:
-            raise RuntimeError(
-                "Timed out waiting for Speechify to process the text. "
-                f"Final URL: {page.url}"
-            )
+        try:
+            await _verify_item_playable(page, doc_url, debug=debug)
+        except Exception:
+            item_id = _extract_item_id(doc_url)
+            if item_id:
+                log.warning(
+                    "Speechify item %s failed verification; deleting half-state item",
+                    item_id,
+                )
+                try:
+                    await _perform_delete(page, item_id, debug=debug)
+                except Exception as cleanup_err:
+                    log.warning(
+                        "Cleanup of half-state item %s failed: %s",
+                        item_id, cleanup_err,
+                    )
+            raise
 
         if debug:
             await _save_screenshot(page, "text-04-done")
@@ -638,6 +543,28 @@ async def _save_screenshot(page, name: str):
     await page.screenshot(path=str(path), full_page=True)
 
 
+async def _dump_failure(page, name: str) -> None:
+    """Save a screenshot + raw HTML of the page for selector-failure debugging.
+
+    Best-effort: never raises. Output goes to ``SCREENSHOT_DIR`` with a
+    timestamp suffix so successive failures don't overwrite each other.
+    """
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    try:
+        await page.screenshot(
+            path=str(SCREENSHOT_DIR / f"failure-{name}-{ts}.png"),
+            full_page=True,
+        )
+    except Exception as e:
+        log.debug("dump_failure: screenshot failed: %s", e)
+    try:
+        html = await page.content()
+        (SCREENSHOT_DIR / f"failure-{name}-{ts}.html").write_text(html)
+    except Exception as e:
+        log.debug("dump_failure: html dump failed: %s", e)
+
+
 async def _click_first_visible(page, selectors, step, timeout=5_000):
     loc = await _find_first_visible(page, selectors, step, timeout)
     await loc.click()
@@ -655,3 +582,218 @@ async def _find_first_visible(page, selectors, step, timeout=5_000):
         except Exception:
             continue
     raise _StepSkipped(f"No visible element for '{step}'. Tried: {selectors}")
+
+
+# ---------------------------------------------------------------------------
+# Paste-text upload internals (shared by BrowserSession.add_text and the
+# standalone add_text). Pulled out so the resilience + verification +
+# orphan-cleanup logic isn't duplicated in two places (issue #39).
+# ---------------------------------------------------------------------------
+
+async def _do_add_text(page, text: str, title: str = "", debug: bool = False) -> str:
+    """Drive the Paste Text modal end-to-end and return the /item/ URL.
+
+    Raises ``RuntimeError`` if the menu item never appears or Speechify
+    never redirects to /item/<uuid> within the timeout. On menu-item
+    failure, dumps the page screenshot + HTML so we can see what changed.
+    """
+    if debug:
+        await _save_screenshot(page, "text-01-before-new-menu")
+
+    # Open "New" menu
+    await page.locator('[data-testid="sidebar-import-button"]').click()
+    await page.wait_for_timeout(600)
+
+    # Click "Paste Text" — was previously a single bare locator.click() that
+    # used Playwright's implicit 30s timeout. Issue #39: this click times
+    # out roughly once per 20 uploads, and the retry path produced corrupt
+    # items. Use the same fallback-selector helper used elsewhere, with a
+    # generous timeout, and dump the DOM on failure.
+    try:
+        await _click_first_visible(
+            page,
+            PASTE_TEXT_MENU_SELECTORS,
+            step="paste-text menu item",
+            timeout=PASTE_TEXT_MENU_TIMEOUT_MS,
+        )
+    except _StepSkipped:
+        await _dump_failure(page, "paste-text-menu")
+        raise RuntimeError(
+            f"Paste Text menu item not visible after "
+            f"{PASTE_TEXT_MENU_TIMEOUT_MS // 1000}s. DOM dumped to "
+            f"{SCREENSHOT_DIR}. Speechify's UI may have changed."
+        )
+    await page.wait_for_timeout(1_000)
+
+    if debug:
+        await _save_screenshot(page, "text-02-paste-text-modal")
+
+    # Fill title (optional) and text
+    if title:
+        await page.locator('input[placeholder="Optional"]').fill(title)
+    # Use React-compatible JS setter — .fill() times out on large text (>100K chars)
+    textarea = page.locator('textarea[placeholder="Type or paste text here"]')
+    await textarea.evaluate(
+        """(el, val) => {
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLTextAreaElement.prototype, 'value'
+            ).set;
+            setter.call(el, val);
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+        }""",
+        text,
+    )
+    await page.wait_for_timeout(500)
+
+    if debug:
+        await _save_screenshot(page, "text-03-filled")
+
+    await page.locator('[data-testid="add-text-save-button"]').click()
+
+    # Wait for processing — page redirects to /item/<uuid> when done
+    for _ in range(30):
+        await page.wait_for_timeout(1_000)
+        if "/item/" in page.url:
+            return page.url
+
+    raise RuntimeError(
+        "Timed out waiting for Speechify to process the text. "
+        f"Final URL: {page.url}"
+    )
+
+
+async def _verify_item_playable(page, item_url: str, debug: bool = False) -> None:
+    """Confirm the Speechify item at ``item_url`` is in a playable state.
+
+    Issue #39: a flaky paste-text upload occasionally produces an item URL
+    that looks valid but renders "Oops, something went wrong. Try again
+    later." in the mobile app. This helper navigates to the item page,
+    waits for it to render, and raises ``RuntimeError`` if the error
+    overlay is present — letting the caller's retry path run cleanly
+    instead of returning a corrupt URL.
+    """
+    item_id = _extract_item_id(item_url)
+    if not item_id:
+        raise RuntimeError(f"Not a Speechify item URL: {item_url}")
+
+    expected = f"https://app.speechify.com/item/{item_id}"
+    if not page.url.startswith(expected):
+        await page.goto(expected, wait_until="load", timeout=30_000)
+    await page.wait_for_timeout(2_000)
+
+    if debug:
+        await _save_screenshot(page, "verify-01-item-page")
+
+    for phrase in ITEM_ERROR_PHRASES:
+        # Case-insensitive text match. We OR the phrases via Playwright's
+        # text= regex so a single .count() suffices.
+        count = await page.locator(f"text=/{re.escape(phrase)}/i").count()
+        if count > 0:
+            await _dump_failure(page, f"verify-error-overlay-{item_id}")
+            raise RuntimeError(
+                f"Speechify item {item_id} shows error overlay "
+                f"({phrase!r}) — half-state upload, will not be playable. "
+                f"URL: {item_url}"
+            )
+
+
+async def _maybe_delete_partial_item(page, debug: bool = False) -> None:
+    """If ``page.url`` is on a Speechify item, delete it. Best-effort.
+
+    Used to clean up after a failed paste-text flow so the user's library
+    isn't left with half-state items.
+    """
+    item_id = _extract_item_id(getattr(page, "url", None))
+    if not item_id:
+        return
+    log.warning(
+        "Paste-text flow failed mid-upload on /item/%s; attempting cleanup",
+        item_id,
+    )
+    try:
+        await _perform_delete(page, item_id, debug=debug)
+    except Exception as e:
+        log.warning("Cleanup of partial item %s failed: %s", item_id, e)
+
+
+async def _perform_delete(page, item_id: str, debug: bool = False) -> None:
+    """Delete a Speechify item using the existing page. Raises on failure."""
+    if debug:
+        await _save_screenshot(page, "delete-01-before")
+
+    await page.goto(
+        f"https://app.speechify.com/item/{item_id}",
+        wait_until="load",
+        timeout=60_000,
+    )
+    await page.wait_for_timeout(2_000)
+
+    if debug:
+        await _save_screenshot(page, "delete-02-item-page")
+
+    try:
+        more_btn = await _find_first_visible(page, [
+            '[data-testid*="more"]',
+            '[data-testid*="menu"]',
+            '[aria-label*="More"]',
+            '[aria-label*="more"]',
+            '[aria-label*="Options"]',
+            '[aria-label*="options"]',
+            'button[aria-haspopup]',
+            'button[aria-haspopup="menu"]',
+            '[data-testid*="kebab"]',
+            '[data-testid*="ellipsis"]',
+        ], step="more/menu button", timeout=8_000)
+        await more_btn.click()
+        await page.wait_for_timeout(1_000)
+
+        if debug:
+            await _save_screenshot(page, "delete-03-menu-open")
+    except _StepSkipped:
+        # No menu button found — delete button might be directly visible
+        pass
+
+    await _click_first_visible(page, [
+        '[data-testid*="delete"]',
+        '[data-testid*="Delete"]',
+        '[data-testid*="trash"]',
+        '[data-testid*="remove"]',
+        'button:has-text("Delete")',
+        'button:has-text("Remove")',
+        '[role="menuitem"]:has-text("Delete")',
+        '[role="menuitem"]:has-text("Remove")',
+        'a:has-text("Delete")',
+        'div:has-text("Delete"):not(:has(div:has-text("Delete")))',
+    ], step="delete button", timeout=8_000)
+    await page.wait_for_timeout(1_000)
+
+    if debug:
+        await _save_screenshot(page, "delete-04-after-delete-click")
+
+    try:
+        await _click_first_visible(page, [
+            '[data-testid*="confirm"]',
+            '[data-testid*="delete-confirm"]',
+            'button:has-text("Delete")',
+            'button:has-text("Confirm")',
+            'button:has-text("Yes")',
+            '[role="dialog"] button:has-text("Delete")',
+            '[role="dialog"] button:has-text("Confirm")',
+            '[role="alertdialog"] button:has-text("Delete")',
+        ], step="confirm deletion", timeout=5_000)
+    except _StepSkipped:
+        # No confirmation dialog — deletion may have proceeded directly
+        pass
+
+    await page.wait_for_timeout(2_000)
+
+    if debug:
+        await _save_screenshot(page, "delete-05-done")
+
+    if f"/item/{item_id}" in page.url:
+        not_found = await page.locator("text=not found").count()
+        gone = await page.locator("text=deleted").count()
+        if not_found == 0 and gone == 0:
+            raise RuntimeError(
+                f"Deletion may have failed — still on item page: {page.url}"
+            )
