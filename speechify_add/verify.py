@@ -17,6 +17,41 @@ from chrome_hub import async_new_page
 log = logging.getLogger(__name__)
 
 
+# JS evaluator that extracts library-item rows from the rendered DOM.
+# Issue #45: Speechify rolled out a Library UI redesign — the old
+# `<button>` rows with inline "73% · web" innerText are gone. The new
+# rows are `<div role="button">` containing structural testids
+# (library-item-title / library-item-progress / library-item-date /
+# library-item-type). Items at 0% don't render the progress div, so
+# we synthesize "0%" for backward-compat with parse_progress_pct.
+_LIBRARY_ITEMS_JS = """
+() => {
+    const titles = document.querySelectorAll(
+        '[data-testid="library-item-title"]'
+    );
+    return Array.from(titles).map(t => {
+        const row = t.closest('[role="button"]')
+            || t.closest('button')
+            || t.parentElement;
+        const progEl = row?.querySelector(
+            '[data-testid="library-item-progress"]'
+        );
+        const dateEl = row?.querySelector(
+            '[data-testid="library-item-date"]'
+        );
+        const typeEl = row?.querySelector(
+            '[data-testid="library-item-type"]'
+        );
+        const progress = progEl ? progEl.innerText.trim() : '0%';
+        const date = dateEl ? dateEl.innerText.trim() : '';
+        const type_ = typeEl ? typeEl.innerText.trim() : '';
+        const meta = [progress, date, type_].filter(Boolean).join(' ∙ ');
+        return { title: (t.innerText || '').trim(), meta };
+    });
+}
+"""
+
+
 async def search_library(query: str) -> list[dict]:
     """
     Search the Speechify library for items matching `query`.
@@ -48,25 +83,7 @@ async def search_library(query: str) -> list[dict]:
         await page.wait_for_timeout(2_000)  # wait for results to filter
         log.debug("search_library: search filled+filtered (%.2fs)", time.perf_counter() - t3)
 
-        # Collect all visible library items
-        items = await page.evaluate("""
-            () => {
-                const results = [];
-                for (const btn of document.querySelectorAll('button')) {
-                    const text = btn.innerText?.trim();
-                    // Library items contain "0%" or "100%" progress + a type tag
-                    if (text && /\\d+%/.test(text) && /(web|pdf|txt|epub|mp3)/.test(text)) {
-                        const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
-                        results.push({
-                            title: lines[0] || '',
-                            meta: lines.slice(1).join(' · ')
-                        });
-                    }
-                }
-                return results;
-            }
-        """)
-
+        items = await page.evaluate(_LIBRARY_ITEMS_JS)
         return items
 
 
@@ -107,19 +124,7 @@ async def search_library_batch(queries: list[str]) -> list[int | None]:
             await search_input.fill(query)
             await page.wait_for_timeout(2_000)
 
-            items = await page.evaluate("""
-                () => {
-                    const results = [];
-                    for (const btn of document.querySelectorAll('button')) {
-                        const text = btn.innerText?.trim();
-                        if (text && /\\d+%/.test(text) && /(web|pdf|txt|epub|mp3)/.test(text)) {
-                            const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
-                            results.push({ title: lines[0] || '', meta: lines.slice(1).join(' · ') });
-                        }
-                    }
-                    return results;
-                }
-            """)
+            items = await page.evaluate(_LIBRARY_ITEMS_JS)
 
             if items:
                 pct = parse_progress_pct(items[0]["meta"])
@@ -132,6 +137,47 @@ async def search_library_batch(queries: list[str]) -> list[int | None]:
             await page.wait_for_timeout(200)
 
         return results
+
+
+# Phrase Speechify renders when an item URL is non-existent / inaccessible.
+# Confirmed live: visiting /item/<bogus-uuid> shows
+# "Oops! Something went wrong / Refresh the page or try again later /
+# Return to My Library / Need help? Contact support" (~113 chars).
+_ITEM_NOT_FOUND_PHRASE = "Oops! Something went wrong"
+
+
+async def verify_item_url(item_id: str) -> tuple[bool, str]:
+    """Confirm the Speechify item at /item/<item_id> renders real content.
+
+    Returns ``(ok, message)``. This is the reliable verification path for
+    freshly-uploaded items: Speechify's library search has indexing
+    latency (observed: 25+ minutes during the issue #45 investigation),
+    so a search by title can return zero matches for an item that
+    actually exists. Going directly to the item URL bypasses the search
+    layer entirely.
+    """
+    item_url = f"https://app.speechify.com/item/{item_id}"
+    log.debug("verify_item_url: %s", item_url)
+    async with async_new_page() as page:
+        await page.goto(item_url, wait_until="load", timeout=30_000)
+        await page.wait_for_timeout(3_000)
+        if "/item/" not in page.url:
+            return False, (
+                f"redirected away from item page to {page.url} — "
+                "likely 404 / not logged in"
+            )
+        body = await page.evaluate("() => document.body.innerText || ''")
+        if _ITEM_NOT_FOUND_PHRASE in body:
+            return False, (
+                f"page shows the {_ITEM_NOT_FOUND_PHRASE!r} overlay — "
+                "item does not exist or is inaccessible"
+            )
+        if len(body) < 200:
+            return False, (
+                f"body content is only {len(body)} chars — "
+                "item exists but appears empty / broken"
+            )
+        return True, f"body has {len(body)} chars of content"
 
 
 async def get_page_title(url: str) -> str | None:

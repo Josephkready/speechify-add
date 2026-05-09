@@ -334,8 +334,10 @@ class TestDoVerify:
 
     def test_url_with_empty_title_falls_back_to_url_path(self, capsys):
         with patch("speechify_add.verify.get_page_title", AsyncMock(return_value=None)):
+            # Issue #45: result must title-match the search term to verify; the
+            # fixture title contains the URL-path words so the strict match passes.
             with patch("speechify_add.verify.search_library", AsyncMock(return_value=[
-                {"title": "Some Result", "meta": ""}
+                {"title": "My Article About Science", "meta": ""}
             ])) as mock_search:
                 run(_do_verify("https://example.com/my-article-about-science"))
 
@@ -347,6 +349,80 @@ class TestDoVerify:
         with patch("speechify_add.verify.search_library", AsyncMock(return_value=[])):
             with pytest.raises(SystemExit):
                 run(_do_verify("nothing found here"))
+
+    def test_fuzzy_results_without_title_match_raises_systemexit(self):
+        """Issue #45: Speechify search is fuzzy, so non-empty results don't
+        prove the specific item we asked about exists. Verify must require
+        a title-substring match before exiting 0; otherwise dailybrief's
+        verify-after-upload step (which calls this CLI) treats every upload
+        as verified just because *some* article matched the query."""
+        fuzzy_misses = [
+            {"title": "Your website is not for you", "meta": ""},
+            {"title": "AI agent's response time", "meta": ""},
+        ]
+        with patch("speechify_add.verify.search_library", AsyncMock(return_value=fuzzy_misses)):
+            with pytest.raises(SystemExit):
+                run(_do_verify("LLMs corrupt your documents"))
+
+    def test_strict_match_passes_when_title_contains_query(self):
+        """If at least one returned title contains the query (case-insensitive),
+        verify exits 0."""
+        with patch("speechify_add.verify.search_library", AsyncMock(return_value=[
+            {"title": "Some Other Article", "meta": ""},
+            {"title": "LLMs Corrupt Your Documents When You Delegate", "meta": "0% ∙ May 9 ∙ txt"},
+        ])):
+            # Must not raise SystemExit
+            run(_do_verify("LLMs corrupt your documents"))
+
+    def test_strict_match_passes_when_query_contains_title(self):
+        """Reverse direction: if the result title is itself a substring of the
+        query (e.g. user passes a long title, library has a shorter form),
+        treat it as a match."""
+        with patch("speechify_add.verify.search_library", AsyncMock(return_value=[
+            {"title": "Bun ported to Rust", "meta": ""},
+        ])):
+            # User searches for the longer phrasing; library has shorter title.
+            run(_do_verify("Bun ported to Rust in 6 days"))
+
+    def test_uuid_input_takes_url_based_path(self):
+        """Issue #45: a bare UUID or item URL routes to verify_item_url and
+        skips the (lossy) library-search path entirely."""
+        uuid = "cff1772b-7603-4d46-966c-97b4b4566443"
+        with patch(
+            "speechify_add.verify.verify_item_url",
+            AsyncMock(return_value=(True, "body has 1234 chars of content")),
+        ) as vmocked, patch(
+            "speechify_add.verify.search_library",
+            AsyncMock(return_value=[]),
+        ) as smocked:
+            run(_do_verify(uuid))
+        vmocked.assert_awaited_once_with(uuid)
+        smocked.assert_not_awaited()
+
+    def test_full_item_url_takes_url_based_path(self):
+        """Same routing for a complete /item/<uuid> URL."""
+        uuid = "cff1772b-7603-4d46-966c-97b4b4566443"
+        url = f"https://app.speechify.com/item/{uuid}"
+        with patch(
+            "speechify_add.verify.verify_item_url",
+            AsyncMock(return_value=(True, "body has 1234 chars of content")),
+        ) as vmocked, patch(
+            "speechify_add.verify.search_library",
+            AsyncMock(return_value=[]),
+        ) as smocked:
+            run(_do_verify(url))
+        vmocked.assert_awaited_once_with(uuid)
+        smocked.assert_not_awaited()
+
+    def test_url_based_verify_failure_exits_nonzero(self):
+        """When verify_item_url returns (False, msg), CLI exits 1."""
+        uuid = "00000000-0000-0000-0000-000000000000"
+        with patch(
+            "speechify_add.verify.verify_item_url",
+            AsyncMock(return_value=(False, "page shows the 'Oops! ...' overlay")),
+        ):
+            with pytest.raises(SystemExit):
+                run(_do_verify(uuid))
 
 
 # ---------------------------------------------------------------------------

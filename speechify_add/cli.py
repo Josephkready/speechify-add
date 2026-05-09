@@ -295,6 +295,15 @@ _SPEECHIFY_ITEM_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Stricter form: input must be JUST a Speechify item URL or bare UUID
+# (not e.g. a sentence containing one). Used by `verify` to decide
+# between URL-based (reliable) and search-based (lossy) verification.
+_SPEECHIFY_ITEM_REF_RE = re.compile(
+    r"^(?:https?://app\.speechify\.com/item/)?"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$",
+    re.IGNORECASE,
+)
+
 
 def _parse_item_id(item: str) -> str:
     """Extract a Speechify item UUID from a full URL or bare UUID string."""
@@ -306,6 +315,16 @@ def _parse_item_id(item: str) -> str:
             "or a URL like https://app.speechify.com/item/<uuid>"
         )
     return m.group(1)
+
+
+def _try_parse_item_ref(s: str) -> str | None:
+    """Return the UUID if `s` is exactly a Speechify item URL or UUID.
+
+    Unlike `_parse_item_id`, returns None instead of raising so callers
+    can branch on whether the input is URL-shaped vs. a search query.
+    """
+    m = _SPEECHIFY_ITEM_REF_RE.match(s.strip())
+    return m.group(1) if m else None
 
 
 @cli.command()
@@ -345,11 +364,23 @@ async def _do_delete(item_id: str, mode: str = "browser", debug: bool = False) -
 @click.argument("query")
 def verify(query):
     """
-    Search your Speechify library and confirm an article is there.
+    Confirm an item is in your Speechify library.
 
-    QUERY can be a URL (title is fetched automatically) or any search term.
+    QUERY can be one of:
+    \b
+      * Speechify item URL or bare UUID — direct URL-based check
+        (recommended; reliable for freshly-uploaded items).
+      * Article URL — fetches the page title and searches.
+      * Free-form search text — searches the library.
+
+    Search-based modes have indexing latency: brand-new uploads can
+    take minutes to surface, so prefer the UUID/URL form when verifying
+    something you just uploaded.
 
     Examples:
+    \b
+      speechify-add verify https://app.speechify.com/item/783247eb-...
+      speechify-add verify 783247eb-59c9-4ade-9027-e01f8d77d959
       speechify-add verify https://arstechnica.com/...
       speechify-add verify "cosmic distance ladder"
     """
@@ -359,7 +390,20 @@ def verify(query):
 async def _do_verify(query: str):
     from . import verify as verify_module
 
-    # If it looks like a URL, fetch the page title to search by
+    # Speechify item URL or bare UUID → URL-based verification (issue #45).
+    # Reliable for freshly-uploaded items; the library search has
+    # ~minutes of indexing latency so a title search won't surface them.
+    item_id = _try_parse_item_ref(query)
+    if item_id:
+        click.echo(f"Verifying https://app.speechify.com/item/{item_id} ...")
+        ok, info = await verify_module.verify_item_url(item_id)
+        if ok:
+            click.echo(f"✓  {info}")
+            return
+        click.echo(f"✗  {info}", err=True)
+        raise SystemExit(1)
+
+    # If it looks like an article URL, fetch the page title to search by
     search_term = query
     if query.startswith("http"):
         click.echo(f"Fetching title for {query} ...")
@@ -386,8 +430,29 @@ async def _do_verify(query: str):
         click.echo(f"\n✗  No results found for \"{search_term}\"")
         raise SystemExit(1)
 
-    click.echo(f"\n{len(results)} result(s) found:\n")
-    for item in results:
+    # Speechify's library search is fuzzy/semantic — a non-empty result list
+    # alone isn't proof the specific item we asked about exists. Issue #45:
+    # require a title-substring match (case-insensitive, in either direction)
+    # before treating the verification as passed. Otherwise callers like
+    # dailybrief's verify-after-upload step would treat every upload as
+    # verified just because the search returned any related article.
+    needle = search_term.lower()
+    matches = [
+        item for item in results
+        if needle in item["title"].lower() or item["title"].lower() in needle
+    ]
+
+    if not matches:
+        click.echo(
+            f"\n✗  None of {len(results)} result(s) contain "
+            f"\"{search_term}\" in the title; closest fuzzy matches:\n"
+        )
+        for item in results[:5]:
+            click.echo(f"     ~  {item['title']}")
+        raise SystemExit(1)
+
+    click.echo(f"\n{len(matches)} matching result(s):\n")
+    for item in matches:
         click.echo(f"  ✓  {item['title']}")
         if item["meta"]:
             click.echo(f"     {item['meta']}")

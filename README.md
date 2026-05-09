@@ -91,15 +91,23 @@ Uses the `archiveLibraryItem` API — no browser needed.
 
 ### Search / verify
 
-Confirm an article is in your library:
+Confirm an item is in your library:
 
 ```bash
-# Search by URL (fetches the page title automatically)
+# Direct URL/UUID check — recommended for verifying something you just uploaded.
+# Bypasses Speechify's library search (which has minutes of indexing latency
+# for fresh uploads) and goes straight to the item page.
+speechify-add verify https://app.speechify.com/item/783247eb-59c9-4ade-9027-e01f8d77d959
+speechify-add verify 783247eb-59c9-4ade-9027-e01f8d77d959
+
+# Article URL (fetches the page title and searches by it)
 speechify-add verify https://arstechnica.com/some-article/
 
-# Search by keyword
+# Free-form keyword search
 speechify-add verify "cosmic distance ladder"
 ```
+
+The search-based modes match by title substring (case-insensitive, either direction): a non-empty fuzzy result list isn't enough, the query must actually appear in at least one returned title. The URL/UUID mode is the reliable form for automation that wants to verify the upload it just did.
 
 ### Auth management
 

@@ -31,3 +31,12 @@ speechify-add = "speechify_add.cli:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["speechify_add*"]
+
+[tool.pytest.ini_options]
+# Default to skipping live tests so unit-suite runs are fast and offline.
+# Run live tests explicitly with: pytest -m live
+addopts = "-m 'not live'"
+asyncio_mode = "auto"
+markers = [
+    "live: hits real external services (chrome-hub, Speechify); skipped by default",
+]
