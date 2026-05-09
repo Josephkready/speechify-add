@@ -384,6 +384,46 @@ class TestDoVerify:
             # User searches for the longer phrasing; library has shorter title.
             run(_do_verify("Bun ported to Rust in 6 days"))
 
+    def test_uuid_input_takes_url_based_path(self):
+        """Issue #45: a bare UUID or item URL routes to verify_item_url and
+        skips the (lossy) library-search path entirely."""
+        uuid = "cff1772b-7603-4d46-966c-97b4b4566443"
+        with patch(
+            "speechify_add.verify.verify_item_url",
+            AsyncMock(return_value=(True, "body has 1234 chars of content")),
+        ) as vmocked, patch(
+            "speechify_add.verify.search_library",
+            AsyncMock(return_value=[]),
+        ) as smocked:
+            run(_do_verify(uuid))
+        vmocked.assert_awaited_once_with(uuid)
+        smocked.assert_not_awaited()
+
+    def test_full_item_url_takes_url_based_path(self):
+        """Same routing for a complete /item/<uuid> URL."""
+        uuid = "cff1772b-7603-4d46-966c-97b4b4566443"
+        url = f"https://app.speechify.com/item/{uuid}"
+        with patch(
+            "speechify_add.verify.verify_item_url",
+            AsyncMock(return_value=(True, "body has 1234 chars of content")),
+        ) as vmocked, patch(
+            "speechify_add.verify.search_library",
+            AsyncMock(return_value=[]),
+        ) as smocked:
+            run(_do_verify(url))
+        vmocked.assert_awaited_once_with(uuid)
+        smocked.assert_not_awaited()
+
+    def test_url_based_verify_failure_exits_nonzero(self):
+        """When verify_item_url returns (False, msg), CLI exits 1."""
+        uuid = "00000000-0000-0000-0000-000000000000"
+        with patch(
+            "speechify_add.verify.verify_item_url",
+            AsyncMock(return_value=(False, "page shows the 'Oops! ...' overlay")),
+        ):
+            with pytest.raises(SystemExit):
+                run(_do_verify(uuid))
+
 
 # ---------------------------------------------------------------------------
 # Integration tests
