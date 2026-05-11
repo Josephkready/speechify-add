@@ -147,9 +147,10 @@ _ITEM_NOT_FOUND_PHRASE = "Oops! Something went wrong"
 
 
 # Minimum body length we treat as "real content" on an item page. The
-# "Oops! Something went wrong" stub is ~113 chars; legitimate items are
-# 1000+ chars (title + summary + player UI text).
-_PLAYABLE_MIN_BODY_CHARS = 200
+# "Oops! Something went wrong" stub is ~113 chars. Paywalled articles
+# can produce short extractions (~185 chars rendered on the item page),
+# so 150 gives a safe margin above the error stub while accepting them.
+_PLAYABLE_MIN_BODY_CHARS = 150
 
 # How long verify_item_url polls before giving up. Issue #47: the page
 # can briefly render the "Oops!" overlay or a near-empty body for ~20s
