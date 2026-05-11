@@ -154,7 +154,9 @@ _PLAYABLE_MIN_BODY_CHARS = 200
 # How long verify_item_url polls before giving up. Issue #47: the page
 # can briefly render the "Oops!" overlay or a near-empty body for ~20s
 # right after upload while Speechify finalizes the item server-side.
-_VERIFY_ITEM_MAX_WAIT_SEC = 30.0
+# 60s observed necessary for slow-rendering articles (185-char body at
+# 30s that would settle to full content given more time).
+_VERIFY_ITEM_MAX_WAIT_SEC = 60.0
 # Interval between polls within that window.
 _VERIFY_ITEM_POLL_INTERVAL_SEC = 2.0
 
