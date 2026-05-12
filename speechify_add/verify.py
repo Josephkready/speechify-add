@@ -11,8 +11,10 @@ import re
 import time
 
 import httpx
+from playwright.async_api import async_playwright
 
 from chrome_hub import async_new_page
+from chrome_hub.browser import CDP_URL
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +219,115 @@ async def verify_item_url(
             f"item never became playable within {max_wait:.0f}s "
             f"({polls} polls; last: {last_reason})"
         )
+
+
+# Issue #51: verify_item_url runs inside chrome-hub's default browser
+# context, which also holds the IndexedDB caches written during upload.
+# Broken items (Firestore record exists, Firebase Storage content blob
+# missing) still render from those caches — so the in-session probe is
+# blind to the bug class that produces unreadable URLs for other browsers.
+# verify_item_url_fresh_context opens a clean BrowserContext on the same
+# Chrome instance (no shared cookies / localStorage / IndexedDB), then
+# transplants only the Speechify auth cookies so we can navigate as the
+# logged-in user. This reproduces what a fresh tab on the user's phone
+# sees: if the content blob isn't fetchable, the page renders the
+# "Oops! Something went wrong" overlay and we fail closed.
+_FRESH_AUTH_COOKIE_NAMES = {"session", "axwrt", "cf_clearance"}
+_FRESH_CTX_MAX_WAIT_SEC = 30.0
+_FRESH_CTX_POLL_INTERVAL_SEC = 2.0
+
+
+async def verify_item_url_fresh_context(
+    item_id: str, *, max_wait: float = _FRESH_CTX_MAX_WAIT_SEC,
+) -> tuple[bool, str]:
+    """Confirm /item/<item_id> renders for a session that did NOT do the upload.
+
+    Connects to the same chrome-hub Chrome via CDP, but creates a fresh
+    BrowserContext with no shared storage. Copies the Speechify auth
+    cookies from chrome-hub's default context so the new context is
+    logged in as the same user, then polls the item page the same way
+    verify_item_url does.
+
+    A False return here proves the item is unfetchable by ordinary
+    user sessions — even though verify_item_url (which sees the upload
+    session's IndexedDB cache) may still return True. See issue #51.
+
+    Returns ``(ok, message)``. The caller is responsible for retrying
+    on transient False if it's appropriate (post-upload settle).
+    """
+    item_url = f"https://app.speechify.com/item/{item_id}"
+    log.debug(
+        "verify_item_url_fresh_context: %s (max_wait=%.0fs)",
+        item_url, max_wait,
+    )
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.connect_over_cdp(CDP_URL)
+
+        # Pull auth cookies off whichever default context chrome-hub set up.
+        # contexts[0] is the shared session that owns the upload-time state.
+        auth_cookies = []
+        if browser.contexts:
+            default_ctx = browser.contexts[0]
+            all_cookies = await default_ctx.cookies(
+                ["https://app.speechify.com/", "https://speechify.com/"]
+            )
+            auth_cookies = [
+                c for c in all_cookies if c.get("name") in _FRESH_AUTH_COOKIE_NAMES
+            ]
+        if not auth_cookies:
+            return False, (
+                "no Speechify auth cookies available in chrome-hub default "
+                "context — fresh-context verify cannot authenticate"
+            )
+
+        fresh_ctx = await browser.new_context()
+        try:
+            await fresh_ctx.add_cookies(auth_cookies)
+            page = await fresh_ctx.new_page()
+            try:
+                await page.goto(item_url, wait_until="load", timeout=30_000)
+                deadline = time.monotonic() + max_wait
+                last_reason = "no checks completed before deadline"
+                polls = 0
+                while time.monotonic() < deadline:
+                    await page.wait_for_timeout(
+                        int(_FRESH_CTX_POLL_INTERVAL_SEC * 1000)
+                    )
+                    polls += 1
+                    if "/item/" not in page.url:
+                        return False, (
+                            f"fresh context redirected from item page to "
+                            f"{page.url} — auth cookie was rejected or item "
+                            "does not exist server-side"
+                        )
+                    body = await page.evaluate(
+                        "() => document.body.innerText || ''"
+                    )
+                    if _ITEM_NOT_FOUND_PHRASE in body:
+                        last_reason = (
+                            f"{_ITEM_NOT_FOUND_PHRASE!r} overlay (poll {polls}) "
+                            "— Firestore record exists but content blob is "
+                            "unfetchable in a fresh session (issue #51)"
+                        )
+                        continue
+                    if len(body) < _PLAYABLE_MIN_BODY_CHARS:
+                        last_reason = (
+                            f"body still only {len(body)} chars (poll {polls})"
+                        )
+                        continue
+                    return True, (
+                        f"fresh-context body has {len(body)} chars of content "
+                        f"(settled after {polls} poll{'s' if polls != 1 else ''})"
+                    )
+                return False, (
+                    f"item never became playable in fresh context within "
+                    f"{max_wait:.0f}s ({polls} polls; last: {last_reason})"
+                )
+            finally:
+                await page.close()
+        finally:
+            await fresh_ctx.close()
 
 
 async def get_page_title(url: str) -> str | None:

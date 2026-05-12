@@ -12,7 +12,9 @@ batch uploads don't re-navigate between items.
 
 import asyncio
 import logging
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -169,14 +171,20 @@ class BrowserSession:
         await self._navigate_to_library()
 
     async def add_text(self, text: str, title: str = "") -> str:
-        """Add raw text via the Paste Text flow, reusing the open browser.
+        """Add raw text by routing through the file-upload flow.
 
-        On any failure mid-flow, attempts to delete a partial item if one was
-        already created (URL is on /item/<uuid>) before re-raising — this
-        keeps the user's library clean and stops the caller's retry path
-        from picking up an orphaned half-state item (issue #39).
+        Issue #51: Speechify's paste-text flow only writes the content to
+        the SPA's local IndexedDB; the background sync to Firebase Storage
+        is broken, so paste-text items show "Oops!" for every browser
+        except the upload session. Routing text through a temp .txt file
+        and the explicit file-upload flow (which POSTs to Firebase Storage
+        synchronously) produces items that any browser can read.
+
+        Side effect: each call opens its own page via ``add_file`` — the
+        session's open page is no longer reused for text adds. The
+        performance cost is small relative to Speechify's processing time.
         """
-        doc_url = await _add_text_with_cleanup(self._page, text, title, self.debug)
+        doc_url = await _add_text_via_file(text, title, self.debug)
         await self._navigate_to_library()
         return doc_url
 
@@ -187,25 +195,68 @@ class BrowserSession:
 
 async def add_text(text: str, title: str = "", debug: bool = False) -> str:
     """
-    Add raw text to Speechify via the "Paste Text" UI flow.
+    Add raw text to Speechify by routing through the file-upload flow.
+
     Returns the Speechify document URL (e.g. https://app.speechify.com/item/<uuid>).
 
-    On any failure mid-flow, attempts to delete a partial item if one
-    was already created (URL is on /item/<uuid>) before re-raising
-    (issue #39).
+    Issue #51: Speechify's paste-text UI flow does not persist the
+    content blob to Firebase Storage — items end up in the upload
+    session's local IndexedDB only, rendering "Oops!" for every other
+    browser. The file-upload flow POSTs to Firebase Storage explicitly,
+    so items produced by it are readable by any authenticated session.
+    This function writes ``text`` to a temporary .txt file, uploads via
+    ``add_file``, then deletes the temp file.
     """
-    async with async_new_page() as page:
-        await _init_speechify_page(page)
+    return await _add_text_via_file(text, title, debug)
 
-        if debug:
-            await _save_screenshot(page, "text-01-page-loaded")
 
-        doc_url = await _add_text_with_cleanup(page, text, title, debug)
+_SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_MAX_FILENAME_LEN = 80
 
-        if debug:
-            await _save_screenshot(page, "text-04-done")
 
-        return doc_url
+def _filename_from_title(title: str) -> str:
+    """Sanitize ``title`` into a filesystem-safe basename.
+
+    Speechify uses the uploaded filename as the item's title when no
+    other metadata is available, so preserving the human-readable title
+    here matters for the user-visible library entry.
+    """
+    cleaned = _SAFE_FILENAME_CHARS.sub("-", title.strip())
+    cleaned = cleaned.strip("-._") or "speechify-add"
+    if len(cleaned) > _MAX_FILENAME_LEN:
+        cleaned = cleaned[:_MAX_FILENAME_LEN].rstrip("-._") or "speechify-add"
+    return cleaned
+
+
+async def _add_text_via_file(text: str, title: str, debug: bool) -> str:
+    """Write ``text`` to a temp .txt file and upload via ``add_file``.
+
+    Issue #51 workaround: the paste-text UI flow doesn't persist content
+    blobs server-side. File uploads do. See ``add_text`` docstring.
+    """
+    safe_name = _filename_from_title(title) if title else "speechify-add-text"
+    # Use ``delete=False`` so we control unlinking; the file must exist
+    # for the entire ``add_file`` duration (Firebase upload reads it).
+    fd, tmp_path_str = tempfile.mkstemp(
+        prefix=f"{safe_name}__", suffix=".txt"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        tmp_path = Path(tmp_path_str)
+        log.debug(
+            "_add_text_via_file: wrote %d chars to %s",
+            len(text), tmp_path,
+        )
+        return await add_file(tmp_path, title=title, debug=debug)
+    finally:
+        try:
+            os.unlink(tmp_path_str)
+        except OSError as e:
+            log.warning(
+                "_add_text_via_file: failed to unlink %s: %s",
+                tmp_path_str, e,
+            )
 
 
 async def add_url(url: str, debug: bool = False) -> str:
@@ -300,6 +351,21 @@ async def add_file(path: Path, title: str = "", debug: bool = False) -> str:
         doc_url = await _wait_for_item_redirect(page, timeout_seconds=180)
         log.debug("add_file: redirect observed in %.2fs", time.perf_counter() - t5)
         log.debug("add_file: TOTAL %.2fs -> %s", time.perf_counter() - t0, doc_url)
+
+        # Issue #51: even on the file-upload path, confirm the item is
+        # actually fetchable from a fresh session (no shared IndexedDB)
+        # before returning. Items that exist only in the upload session's
+        # local cache would otherwise ship as broken URLs to callers.
+        item_id = _extract_item_id(doc_url)
+        if item_id:
+            await _verify_or_cleanup_fresh_context(
+                doc_url, item_id, page, debug=debug,
+            )
+        else:
+            log.warning(
+                "Could not extract item UUID from %r; skipping fresh-context verify",
+                doc_url,
+            )
         return doc_url
 
 
@@ -548,18 +614,94 @@ async def _find_first_visible(page, selectors, step, timeout=5_000):
 # logic isn't duplicated in two places (issue #39).
 # ---------------------------------------------------------------------------
 
+# Issue #51: post-upload, give the SPA up to this long to finish any
+# background work that persists the content blob to Firebase Storage,
+# then confirm the item is fetchable from a session that didn't do the
+# upload. If verify still fails after this budget, the item exists
+# only in the upload session's IndexedDB and would render "Oops!" for
+# every other browser — fail closed instead of returning a broken URL.
+POST_UPLOAD_VERIFY_BUDGET_SEC = 90.0
+POST_UPLOAD_VERIFY_INTERVAL_SEC = 5.0
+
+
 async def _add_text_with_cleanup(
     page, text: str, title: str, debug: bool
 ) -> str:
     """Run ``_do_add_text``, deleting any partial item before re-raising
-    on failure (issue #39). Shared by ``BrowserSession.add_text`` and the
-    standalone ``add_text``.
+    on failure (issue #39).
+
+    .. deprecated:: issue #51
+        The paste-text flow does not persist content blobs to Firebase
+        Storage; resulting items show "Oops!" for every browser except
+        the upload session. ``add_text`` now routes through ``add_file``
+        instead. This helper is kept for reference / fallback callers,
+        but is not on the live upload path.
     """
     try:
         return await _do_add_text(page, text, title=title, debug=debug)
     except Exception:
         await _maybe_delete_partial_item(page, debug=debug)
         raise
+
+
+async def _verify_or_cleanup_fresh_context(
+    item_url: str, item_id: str, page, *, debug: bool,
+) -> None:
+    """Poll a fresh-context verify until the item is fetchable or budget runs out.
+
+    The SPA may finish persisting the content blob asynchronously after
+    redirecting to /item/<uuid>. Retry on a 5s cadence within
+    ``POST_UPLOAD_VERIFY_BUDGET_SEC`` to give it time. If still failing
+    at the deadline, archive the item via the page UI (best-effort) and
+    raise — callers can decide whether to retry the whole upload.
+    """
+    # Imported lazily to avoid a circular import at module load time.
+    from speechify_add.verify import verify_item_url_fresh_context
+
+    deadline = time.monotonic() + POST_UPLOAD_VERIFY_BUDGET_SEC
+    attempt = 0
+    last_reason = "no verify attempts completed"
+    while time.monotonic() < deadline:
+        attempt += 1
+        remaining = deadline - time.monotonic()
+        # Cap each attempt at remaining-budget so we don't overshoot.
+        attempt_wait = min(30.0, max(5.0, remaining))
+        ok, reason = await verify_item_url_fresh_context(
+            item_id, max_wait=attempt_wait,
+        )
+        if ok:
+            log.info(
+                "Fresh-context verify passed for %s on attempt %d (%s)",
+                item_id, attempt, reason,
+            )
+            return
+        last_reason = reason
+        log.warning(
+            "Fresh-context verify attempt %d for %s failed: %s",
+            attempt, item_id, reason,
+        )
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(POST_UPLOAD_VERIFY_INTERVAL_SEC)
+
+    # Budget exhausted — item never persisted server-side. Try to clean up.
+    log.error(
+        "Item %s never became fetchable from a fresh session within %.0fs "
+        "(last: %s) — content blob did not persist (issue #51). Cleaning up.",
+        item_id, POST_UPLOAD_VERIFY_BUDGET_SEC, last_reason,
+    )
+    try:
+        await _perform_delete(page, item_id, debug=debug)
+    except Exception as cleanup_err:
+        log.warning(
+            "Cleanup of unpersisted item %s failed: %s", item_id, cleanup_err,
+        )
+    raise RuntimeError(
+        f"Speechify item {item_id} uploaded but content blob never "
+        f"persisted to Firebase Storage within {POST_UPLOAD_VERIFY_BUDGET_SEC:.0f}s "
+        f"(issue #51). URL would render 'Oops!' for any other browser. "
+        f"Last verify reason: {last_reason}"
+    )
 
 
 async def _open_paste_text_modal(page) -> str:

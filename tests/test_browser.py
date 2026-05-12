@@ -18,6 +18,7 @@ from speechify_add.browser import (
     _maybe_delete_partial_item,
     _open_paste_text_modal,
     _StepSkipped,
+    _verify_or_cleanup_fresh_context,
     BrowserSession,
     ADD_TEXT_BUTTON_SELECTORS,
     ADD_TEXT_BUTTON_TIMEOUT_MS,
@@ -334,69 +335,59 @@ class TestBrowserSessionAddUrl:
 # ---------------------------------------------------------------------------
 
 class TestBrowserSessionAddText:
-    def test_raises_on_timeout_no_item_url(self):
-        """RuntimeError raised when page never redirects to /item/ URL."""
+    """BrowserSession.add_text routes text through the file-upload path
+    (issue #51): write a temp .txt and call add_file. We assert the
+    routing contract here; add_file itself has separate coverage.
+    """
+
+    def test_routes_through_add_file_with_tempfile(self):
+        """Text is written to a .txt file and passed to add_file."""
         session = BrowserSession()
-        page = _make_page(url="https://app.speechify.com")
-        session._page = page
+        session._page = _make_page()
+        # _navigate_to_library is called after the upload — stub it.
+        session._navigate_to_library = AsyncMock()
 
-        page.locator = MagicMock()
-        page.wait_for_timeout = AsyncMock()
-        page.goto = AsyncMock()
+        captured = {}
 
-        def locator_side_effect(selector):
-            m = MagicMock()
-            m.wait_for = AsyncMock()
-            m.click = AsyncMock()
-            m.fill = AsyncMock()
-            m.evaluate = AsyncMock()
-            m.first = m
-            return m
+        async def fake_add_file(path, title="", debug=False):
+            # The tempfile must still exist while add_file is running
+            # so Speechify's Firebase upload can read its bytes.
+            assert path.exists(), f"temp file gone before add_file ran: {path}"
+            captured["path"] = path
+            captured["title"] = title
+            captured["text"] = path.read_text(encoding="utf-8")
+            return "https://app.speechify.com/item/abcdef01-2345-6789-abcd-ef0123456789"
 
-        page.locator.side_effect = locator_side_effect
+        async def run():
+            with patch("speechify_add.browser.add_file", new=fake_add_file):
+                return await session.add_text(
+                    "the body text", title="My Title",
+                )
 
-        with pytest.raises(RuntimeError, match="Timed out waiting for Speechify"):
-            asyncio.get_event_loop().run_until_complete(
-                session.add_text("some text", title="My Title")
-            )
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result.endswith("abcdef01-2345-6789-abcd-ef0123456789")
+        assert captured["text"] == "the body text"
+        assert captured["title"] == "My Title"
+        assert captured["path"].suffix == ".txt"
+        # And the temp file is cleaned up after add_file returns.
+        assert not captured["path"].exists()
 
-    def test_returns_doc_url_when_redirected(self):
-        """Returns the /item/ URL once page redirects there."""
+    def test_propagates_add_file_exceptions(self):
+        """RuntimeError from add_file (e.g. fresh-context verify failure)
+        propagates so callers see real failures instead of broken URLs."""
         session = BrowserSession()
-        item_uuid = "abcdef01-2345-6789-abcd-ef0123456789"
-        item_url = f"https://app.speechify.com/item/{item_uuid}"
-        page = _make_page(url="https://app.speechify.com")
-        session._page = page
+        session._page = _make_page()
+        session._navigate_to_library = AsyncMock()
 
-        call_count = 0
+        async def run():
+            with patch(
+                "speechify_add.browser.add_file",
+                new=AsyncMock(side_effect=RuntimeError("content blob never persisted")),
+            ):
+                with pytest.raises(RuntimeError, match="content blob never persisted"):
+                    await session.add_text("x")
 
-        async def wait_for_timeout_side(_ms):
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 2:
-                page.url = item_url
-
-        page.wait_for_timeout = wait_for_timeout_side
-        page.goto = AsyncMock()
-
-        def locator_side_effect(selector):
-            m = MagicMock()
-            m.wait_for = AsyncMock()
-            m.click = AsyncMock()
-            m.fill = AsyncMock()
-            m.evaluate = AsyncMock()
-            # Verification step uses .count() to look for error-overlay text
-            m.count = AsyncMock(return_value=0)
-            m.first = m
-            return m
-
-        page.locator.side_effect = locator_side_effect
-
-        result = asyncio.get_event_loop().run_until_complete(
-            session.add_text("hello world")
-        )
-        assert "/item/" in result
-        assert result == item_url
+        asyncio.get_event_loop().run_until_complete(run())
 
 
 # ---------------------------------------------------------------------------
@@ -517,48 +508,129 @@ class TestIntegrationBrowserSessionLifecycle:
 
         asyncio.get_event_loop().run_until_complete(run())
 
-    def test_integration_add_text_title_passed_to_fill(self):
-        """When a title is provided, it is passed to input.fill()."""
+    def test_integration_add_text_filename_derived_from_title(self):
+        """Title becomes the temp file's basename so Speechify uses it as
+        the item title (issue #51 routes text through file-upload).
+        """
         async def run():
             session = BrowserSession()
-            page = _make_page(url="https://app.speechify.com")
-            session._page = page
+            session._page = _make_page()
+            session._navigate_to_library = AsyncMock()
+            captured = {}
 
-            fill_calls = []
+            async def fake_add_file(path, title="", debug=False):
+                captured["path"] = path
+                captured["title"] = title
+                return "https://app.speechify.com/item/abcdef01-2345-6789-abcd-ef0123456789"
 
-            async def wait_for_timeout_side(_ms):
-                page.url = "https://app.speechify.com/item/abcdef01-2345-6789-abcd-ef0123456789"
+            with patch("speechify_add.browser.add_file", new=fake_add_file):
+                await session.add_text("body text", title="My Custom Title")
 
-            page.wait_for_timeout = wait_for_timeout_side
-            page.goto = AsyncMock()
-
-            def locator_side_effect(selector):
-                m = MagicMock()
-                m.wait_for = AsyncMock()
-                m.click = AsyncMock()
-                m.evaluate = AsyncMock()
-                # Verification step uses .count() for error-overlay text
-                m.count = AsyncMock(return_value=0)
-                m.first = m
-
-                async def fill_side(val):
-                    fill_calls.append((selector, val))
-
-                m.fill = fill_side
-                return m
-
-            page.locator.side_effect = locator_side_effect
-
-            await session.add_text("body text", title="My Custom Title")
-
-            title_fills = [(s, v) for s, v in fill_calls if 'Optional' in s]
-            assert any("My Custom Title" in v for _, v in title_fills)
+            assert "My-Custom-Title" in captured["path"].name
+            assert captured["title"] == "My Custom Title"
 
         asyncio.get_event_loop().run_until_complete(run())
 
 
 # ---------------------------------------------------------------------------
-# 9. _extract_item_id — pure logic
+# 9. _verify_or_cleanup_fresh_context (issue #51)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyOrCleanupFreshContext:
+    """Post-upload fresh-context verification hook.
+
+    Stubs out ``verify.verify_item_url_fresh_context`` and asserts the
+    retry/cleanup contract: succeed on first OK, retry on transient
+    False until budget exhaustion, then delete + raise.
+    """
+
+    _ITEM_URL = "https://app.speechify.com/item/abcdef01-2345-6789-abcd-ef0123456789"
+    _ITEM_ID = "abcdef01-2345-6789-abcd-ef0123456789"
+
+    def test_returns_quietly_when_first_attempt_passes(self):
+        """If fresh-context verify returns True on attempt 1, exit without delete."""
+        verify_mock = AsyncMock(return_value=(True, "passed"))
+        delete_mock = AsyncMock()
+        sleep_mock = AsyncMock()
+
+        async def run():
+            page = _make_page()
+            with patch(
+                "speechify_add.verify.verify_item_url_fresh_context",
+                new=verify_mock,
+            ), patch(
+                "speechify_add.browser._perform_delete", new=delete_mock,
+            ), patch(
+                "speechify_add.browser.asyncio.sleep", new=sleep_mock,
+            ):
+                await _verify_or_cleanup_fresh_context(
+                    self._ITEM_URL, self._ITEM_ID, page, debug=False,
+                )
+
+        asyncio.get_event_loop().run_until_complete(run())
+        assert verify_mock.await_count == 1
+        delete_mock.assert_not_awaited()
+
+    def test_raises_after_budget_when_verify_keeps_failing(self):
+        """If verify never succeeds, _perform_delete is called and RuntimeError raised."""
+        verify_mock = AsyncMock(return_value=(False, "Oops! persists"))
+        delete_mock = AsyncMock()
+        # Skip real sleeps so the test doesn't take 90s — the loop will
+        # still terminate because monotonic() ticks forward inside verify_mock.
+        sleep_mock = AsyncMock()
+
+        async def run():
+            page = _make_page(url=self._ITEM_URL)
+            with patch(
+                "speechify_add.verify.verify_item_url_fresh_context",
+                new=verify_mock,
+            ), patch(
+                "speechify_add.browser._perform_delete", new=delete_mock,
+            ), patch(
+                "speechify_add.browser.asyncio.sleep", new=sleep_mock,
+            ), patch(
+                "speechify_add.browser.POST_UPLOAD_VERIFY_BUDGET_SEC", 0.5,
+            ):
+                with pytest.raises(RuntimeError, match="content blob never persisted"):
+                    await _verify_or_cleanup_fresh_context(
+                        self._ITEM_URL, self._ITEM_ID, page, debug=False,
+                    )
+
+        asyncio.get_event_loop().run_until_complete(run())
+        assert verify_mock.await_count >= 1
+        delete_mock.assert_awaited_once()
+
+    def test_cleanup_failure_does_not_mask_root_error(self):
+        """If _perform_delete itself raises, the RuntimeError about
+        non-persistence is still what reaches the caller — cleanup
+        failure is logged but secondary."""
+        verify_mock = AsyncMock(return_value=(False, "Oops! persists"))
+        delete_mock = AsyncMock(side_effect=RuntimeError("delete also failed"))
+        sleep_mock = AsyncMock()
+
+        async def run():
+            page = _make_page(url=self._ITEM_URL)
+            with patch(
+                "speechify_add.verify.verify_item_url_fresh_context",
+                new=verify_mock,
+            ), patch(
+                "speechify_add.browser._perform_delete", new=delete_mock,
+            ), patch(
+                "speechify_add.browser.asyncio.sleep", new=sleep_mock,
+            ), patch(
+                "speechify_add.browser.POST_UPLOAD_VERIFY_BUDGET_SEC", 0.5,
+            ):
+                with pytest.raises(RuntimeError, match="content blob never persisted"):
+                    await _verify_or_cleanup_fresh_context(
+                        self._ITEM_URL, self._ITEM_ID, page, debug=False,
+                    )
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+
+# ---------------------------------------------------------------------------
+# 10. _extract_item_id — pure logic
 # ---------------------------------------------------------------------------
 
 class TestExtractItemId:
@@ -626,54 +698,40 @@ class TestMaybeDeletePartialItem:
 # 12. BrowserSession.add_text — orphan-cleanup path (issue #39)
 # ---------------------------------------------------------------------------
 
-class TestAddTextVerificationCleanup:
-    _UUID = "cff1772b-7603-4d46-966c-97b4b4566443"
-    _ITEM_URL = f"https://app.speechify.com/item/{_UUID}"
+class TestFilenameFromTitle:
+    """``_filename_from_title`` derives a filesystem-safe filename from
+    the item title so Speechify shows a human-readable name in the
+    library (its file-upload flow uses filename as the displayed title).
+    """
 
-    def test_mid_flow_failure_triggers_orphan_cleanup(self):
-        """If the upload itself fails while page is on /item/<uuid>, the
-        partial item is cleaned up before re-raising."""
-        async def run():
-            session = BrowserSession()
-            # Simulate the page already redirected to the item URL when the
-            # error happened (the half-state described in issue #39).
-            page = _make_page(url=self._ITEM_URL)
-            session._page = page
+    @pytest.mark.parametrize(
+        "title,expected",
+        [
+            ("Simple Title", "Simple-Title"),
+            ("With / slashes \\ and *bad* chars", "With-slashes-and-bad-chars"),
+            ("Unicode — café", "Unicode-caf"),  # non-ASCII stripped
+            ("Extra   whitespace  ", "Extra-whitespace"),
+            ("...leading and trailing...", "leading-and-trailing"),
+        ],
+    )
+    def test_sanitizes(self, title, expected):
+        from speechify_add.browser import _filename_from_title
 
-            with patch(
-                "speechify_add.browser._do_add_text",
-                AsyncMock(side_effect=RuntimeError("Save File click timed out")),
-            ), patch(
-                "speechify_add.browser._perform_delete", AsyncMock()
-            ) as pd:
-                with pytest.raises(RuntimeError, match="Save File"):
-                    await session.add_text("hello")
+        assert _filename_from_title(title) == expected
 
-            pd.assert_awaited_once()
-            assert pd.await_args[0][1] == self._UUID
+    def test_falls_back_when_title_is_unprintable(self):
+        from speechify_add.browser import _filename_from_title
 
-        asyncio.get_event_loop().run_until_complete(run())
+        # Pure punctuation strips to empty — fallback to a sane default.
+        assert _filename_from_title("////") == "speechify-add"
+        assert _filename_from_title("") == "speechify-add"
 
-    def test_mid_flow_failure_no_orphan_when_not_on_item(self):
-        """If the failure happened before any item was created, we don't
-        try to delete anything — there's no UUID to clean up."""
-        async def run():
-            session = BrowserSession()
-            page = _make_page(url="https://app.speechify.com")  # never redirected
-            session._page = page
+    def test_truncates_long_titles(self):
+        from speechify_add.browser import _MAX_FILENAME_LEN, _filename_from_title
 
-            with patch(
-                "speechify_add.browser._do_add_text",
-                AsyncMock(side_effect=RuntimeError("Paste Text menu missing")),
-            ), patch(
-                "speechify_add.browser._perform_delete", AsyncMock()
-            ) as pd:
-                with pytest.raises(RuntimeError, match="Paste Text"):
-                    await session.add_text("hello")
-
-            pd.assert_not_awaited()
-
-        asyncio.get_event_loop().run_until_complete(run())
+        long_title = "a" * 200
+        result = _filename_from_title(long_title)
+        assert len(result) <= _MAX_FILENAME_LEN
 
 
 # ---------------------------------------------------------------------------

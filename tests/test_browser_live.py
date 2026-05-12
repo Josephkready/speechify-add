@@ -42,12 +42,14 @@ def _unique_marker() -> str:
 
 @pytest.mark.live
 async def test_live_upload_verify_delete_roundtrip():
-    """End-to-end: paste text → verify the resulting item URL → delete.
+    """End-to-end: add text → verify the resulting item URL → delete.
 
-    Acts as a canary for any future Speechify UI redesign that breaks
-    one of those steps. The test article has a unique marker so a
-    failed cleanup leaves an obvious breadcrumb instead of polluting
-    the user's library silently.
+    Issue #51: text now routes through the file-upload path because the
+    paste-text path doesn't persist content blobs to Firebase Storage.
+    This test exercises that routing (write tempfile → add_file →
+    fresh-context verify happens internally → URL returned). A failure
+    here means either the file-upload path itself broke (UI rotation)
+    or the fresh-context verify caught a content-persistence regression.
 
     Cleanup uses ``api.delete_item`` (Firebase archive endpoint), which
     is independent of the browser-automation flow being tested.
@@ -61,19 +63,22 @@ async def test_live_upload_verify_delete_roundtrip():
     )
 
     log.info("upload: %s", title)
+    # add_text now performs fresh-context verify internally and only
+    # returns a URL after confirming the item is fetchable by sessions
+    # that didn't do the upload. A successful return is the assertion.
     item_url = await browser.add_text(text, title=title)
     item_id = browser._extract_item_id(item_url)
     assert item_id, f"upload returned a URL with no item UUID: {item_url}"
 
     try:
+        # Belt-and-braces: also run the in-session verify so any future
+        # regression in the chrome-hub render path is visible too.
         ok, info = await verify.verify_item_url(item_id)
         assert ok, (
             f"verify_item_url returned False for {item_id} "
             f"(test article we just uploaded): {info}"
         )
     finally:
-        # Always clean up — even if verify failed, the item is real and
-        # would otherwise pollute the library.
         try:
             await api.delete_item(item_id)
         except Exception as cleanup_err:
@@ -82,3 +87,14 @@ async def test_live_upload_verify_delete_roundtrip():
                 "The test article is still in the library; delete it "
                 f"manually with: speechify-add delete {item_id} --mode api"
             )
+
+
+# NOTE: A regression test attempting to assert "paste-text ALWAYS fails
+# to persist content blobs" was dropped from this PR. Empirical evidence
+# shows the failure is *intermittent*, not consistent — paste-text
+# sometimes persists content correctly. The architectural fix (route
+# add_text through add_file) still stands because file-upload is
+# observed to be reliable where paste-text is not. A statistical
+# reliability test (paste-text persistence rate over N attempts) would
+# be the right shape for a follow-up regression guard but is out of
+# scope here.
