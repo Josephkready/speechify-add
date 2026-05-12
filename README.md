@@ -141,7 +141,12 @@ All three are sync wrappers around the underlying async browser flows — they m
 
 ### Issue #51 — text routes through file-upload
 
-`upload_text` (and the underlying `browser.add_text`) writes the text to a temp `.txt` file and uploads it via Speechify's file-upload flow. The SPA's *paste-text* flow doesn't persist content blobs to Firebase Storage — items end up cached only in the upload session's local IndexedDB and render `"Oops!"` for every other browser. The file-upload flow POSTs to Firebase Storage explicitly, producing items any session can read. Trade-off: text uploads now take ~50–60s (vs ~10s) because we wait for fresh-context verification to confirm the content blob is server-side fetchable before returning. Failures raise instead of returning broken URLs.
+`upload_text` (and the underlying `browser.add_text`) writes the text to a temp `.txt` file and uploads it via Speechify's file-upload flow. The SPA's *paste-text* flow doesn't persist content blobs to Firebase Storage — items end up cached only in the upload session's local IndexedDB and render `"Oops!"` for every other browser. The file-upload flow POSTs to Firebase Storage explicitly, producing items any session can read.
+
+Notes on behavior:
+- **Latency**: text uploads now take ~50–60s (vs ~10s) because we wait for fresh-context verification to confirm the content blob is server-side fetchable before returning.
+- **Failure mode**: if the content blob doesn't persist within the 90s budget, the call raises instead of returning a broken URL.
+- **Title rendering**: Speechify uses the uploaded file's basename as the item title (the file-upload flow has no title field). The `title` arg is sanitized into a filesystem-safe name — e.g. `upload_text(text, title="My Article")` produces an item titled `My-Article` in the library.
 
 ---
 
