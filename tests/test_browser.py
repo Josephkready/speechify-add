@@ -628,6 +628,69 @@ class TestVerifyOrCleanupFreshContext:
 
         asyncio.get_event_loop().run_until_complete(run())
 
+    def test_retries_on_exception_from_verify(self):
+        """Transient exceptions during fresh-context verify (e.g. Chrome's
+        ``net::ERR_NETWORK_CHANGED`` during ``page.goto``, or
+        ``TargetClosedError`` from chrome-hub orphan cleanup) should be
+        caught and counted as a failed attempt, then retried within the
+        budget — not propagated as upload failure.
+        """
+        verify_mock = AsyncMock(side_effect=[
+            RuntimeError("net::ERR_NETWORK_CHANGED transient"),
+            (True, "passed on retry"),
+        ])
+        delete_mock = AsyncMock()
+        sleep_mock = AsyncMock()
+
+        async def run():
+            page = _make_page()
+            with patch(
+                "speechify_add.verify.verify_item_url_fresh_context",
+                new=verify_mock,
+            ), patch(
+                "speechify_add.browser._perform_delete", new=delete_mock,
+            ), patch(
+                "speechify_add.browser.asyncio.sleep", new=sleep_mock,
+            ):
+                await _verify_or_cleanup_fresh_context(
+                    self._ITEM_URL, self._ITEM_ID, page, debug=False,
+                )
+
+        asyncio.get_event_loop().run_until_complete(run())
+        # Two attempts: one that raised, one that succeeded
+        assert verify_mock.await_count == 2
+        # Item was eventually verified, so no cleanup
+        delete_mock.assert_not_awaited()
+
+    def test_exhausts_budget_when_verify_keeps_raising(self):
+        """If every attempt raises (transient errors all the way down),
+        the budget eventually expires, cleanup runs, and a RuntimeError
+        with the exception class name in the reason is propagated."""
+        verify_mock = AsyncMock(side_effect=RuntimeError("ERR_NETWORK_CHANGED"))
+        delete_mock = AsyncMock()
+        sleep_mock = AsyncMock()
+
+        async def run():
+            page = _make_page(url=self._ITEM_URL)
+            with patch(
+                "speechify_add.verify.verify_item_url_fresh_context",
+                new=verify_mock,
+            ), patch(
+                "speechify_add.browser._perform_delete", new=delete_mock,
+            ), patch(
+                "speechify_add.browser.asyncio.sleep", new=sleep_mock,
+            ), patch(
+                "speechify_add.browser.POST_UPLOAD_VERIFY_BUDGET_SEC", 0.5,
+            ):
+                with pytest.raises(RuntimeError, match="content blob never persisted"):
+                    await _verify_or_cleanup_fresh_context(
+                        self._ITEM_URL, self._ITEM_ID, page, debug=False,
+                    )
+
+        asyncio.get_event_loop().run_until_complete(run())
+        assert verify_mock.await_count >= 1
+        delete_mock.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # 10. _extract_item_id — pure logic

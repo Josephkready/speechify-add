@@ -666,9 +666,24 @@ async def _verify_or_cleanup_fresh_context(
         remaining = deadline - time.monotonic()
         # Cap each attempt at remaining-budget so we don't overshoot.
         attempt_wait = min(30.0, max(5.0, remaining))
-        ok, reason = await verify_item_url_fresh_context(
-            item_id, max_wait=attempt_wait,
-        )
+        try:
+            ok, reason = await verify_item_url_fresh_context(
+                item_id, max_wait=attempt_wait,
+            )
+        except Exception as e:
+            # Transient errors during fresh-context navigation —
+            # net::ERR_NETWORK_CHANGED (Chrome's HTTP/2 race),
+            # TargetClosedError (orphan-page cleanup), CDP disconnects —
+            # should be retried within the budget rather than aborting
+            # the whole upload. Failure shape is the same from the
+            # retry loop's perspective whether verify returned False
+            # or raised, so we collapse both into "attempt failed".
+            ok = False
+            reason = f"verify raised {type(e).__name__}: {str(e)[:200]}"
+            log.warning(
+                "Fresh-context verify attempt %d for %s raised %s — retrying",
+                attempt, item_id, type(e).__name__,
+            )
         if ok:
             log.info(
                 "Fresh-context verify passed for %s on attempt %d (%s)",
