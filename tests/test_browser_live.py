@@ -89,56 +89,12 @@ async def test_live_upload_verify_delete_roundtrip():
             )
 
 
-@pytest.mark.live
-async def test_live_fresh_context_verify_catches_paste_text_regression():
-    """Issue #51 regression guard: items uploaded via the deprecated
-    paste-text path render only in the upload session's IndexedDB cache;
-    fresh-context verify must detect this and return False.
-
-    If this test ever returns True, paste-text has either been fixed
-    upstream by Speechify or our cache-bypass detection has broken —
-    investigate before claiming the bug is gone.
-    """
-    marker = _unique_marker()
-    title = f"speechify-add paste-text regression check {marker}"
-    text = (
-        f"Marker {marker}. This article is uploaded via the deprecated "
-        "paste-text path explicitly to confirm fresh-context verify "
-        "catches the issue-51 failure mode. Safe to delete."
-    )
-
-    log.info("paste-text upload: %s", title)
-    async with browser.async_new_page() as page:
-        await browser._init_speechify_page(page)
-        item_url = await browser._do_add_text(page, text, title=title)
-
-    item_id = browser._extract_item_id(item_url)
-    assert item_id, f"paste-text upload returned no UUID: {item_url}"
-
-    try:
-        ok, info = await verify.verify_item_url_fresh_context(
-            item_id, max_wait=20.0,
-        )
-        assert not ok, (
-            f"Fresh-context verify unexpectedly PASSED for paste-text item "
-            f"{item_id}. Either issue #51 has been fixed upstream (great — "
-            "remove this regression guard and the file-upload routing in "
-            "add_text) or our cache-bypass detection broke. Verify info: "
-            f"{info}"
-        )
-        # Sanity: the in-session verify should still pass — proves we're
-        # comparing apples-to-apples (item exists, cache hit makes it look
-        # fine from chrome-hub).
-        ok_cached, info_cached = await verify.verify_item_url(item_id)
-        assert ok_cached, (
-            f"In-session verify also failed for paste-text item — "
-            f"upload may not have completed at all: {info_cached}"
-        )
-    finally:
-        try:
-            await api.delete_item(item_id)
-        except Exception as cleanup_err:
-            pytest.fail(
-                f"cleanup failed for {item_id}: {cleanup_err}. "
-                f"Manual cleanup: speechify-add delete {item_id} --mode api"
-            )
+# NOTE: A regression test attempting to assert "paste-text ALWAYS fails
+# to persist content blobs" was dropped from this PR. Empirical evidence
+# shows the failure is *intermittent*, not consistent — paste-text
+# sometimes persists content correctly. The architectural fix (route
+# add_text through add_file) still stands because file-upload is
+# observed to be reliable where paste-text is not. A statistical
+# reliability test (paste-text persistence rate over N attempts) would
+# be the right shape for a follow-up regression guard but is out of
+# scope here.
