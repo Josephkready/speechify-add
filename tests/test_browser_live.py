@@ -42,12 +42,14 @@ def _unique_marker() -> str:
 
 @pytest.mark.live
 async def test_live_upload_verify_delete_roundtrip():
-    """End-to-end: paste text → verify the resulting item URL → delete.
+    """End-to-end: add text → verify the resulting item URL → delete.
 
-    Acts as a canary for any future Speechify UI redesign that breaks
-    one of those steps. The test article has a unique marker so a
-    failed cleanup leaves an obvious breadcrumb instead of polluting
-    the user's library silently.
+    Issue #51: text now routes through the file-upload path because the
+    paste-text path doesn't persist content blobs to Firebase Storage.
+    This test exercises that routing (write tempfile → add_file →
+    fresh-context verify happens internally → URL returned). A failure
+    here means either the file-upload path itself broke (UI rotation)
+    or the fresh-context verify caught a content-persistence regression.
 
     Cleanup uses ``api.delete_item`` (Firebase archive endpoint), which
     is independent of the browser-automation flow being tested.
@@ -61,19 +63,22 @@ async def test_live_upload_verify_delete_roundtrip():
     )
 
     log.info("upload: %s", title)
+    # add_text now performs fresh-context verify internally and only
+    # returns a URL after confirming the item is fetchable by sessions
+    # that didn't do the upload. A successful return is the assertion.
     item_url = await browser.add_text(text, title=title)
     item_id = browser._extract_item_id(item_url)
     assert item_id, f"upload returned a URL with no item UUID: {item_url}"
 
     try:
+        # Belt-and-braces: also run the in-session verify so any future
+        # regression in the chrome-hub render path is visible too.
         ok, info = await verify.verify_item_url(item_id)
         assert ok, (
             f"verify_item_url returned False for {item_id} "
             f"(test article we just uploaded): {info}"
         )
     finally:
-        # Always clean up — even if verify failed, the item is real and
-        # would otherwise pollute the library.
         try:
             await api.delete_item(item_id)
         except Exception as cleanup_err:
@@ -81,4 +86,59 @@ async def test_live_upload_verify_delete_roundtrip():
                 f"cleanup failed for {item_id}: {cleanup_err}. "
                 "The test article is still in the library; delete it "
                 f"manually with: speechify-add delete {item_id} --mode api"
+            )
+
+
+@pytest.mark.live
+async def test_live_fresh_context_verify_catches_paste_text_regression():
+    """Issue #51 regression guard: items uploaded via the deprecated
+    paste-text path render only in the upload session's IndexedDB cache;
+    fresh-context verify must detect this and return False.
+
+    If this test ever returns True, paste-text has either been fixed
+    upstream by Speechify or our cache-bypass detection has broken —
+    investigate before claiming the bug is gone.
+    """
+    marker = _unique_marker()
+    title = f"speechify-add paste-text regression check {marker}"
+    text = (
+        f"Marker {marker}. This article is uploaded via the deprecated "
+        "paste-text path explicitly to confirm fresh-context verify "
+        "catches the issue-51 failure mode. Safe to delete."
+    )
+
+    log.info("paste-text upload: %s", title)
+    async with browser.async_new_page() as page:
+        await browser._init_speechify_page(page)
+        item_url = await browser._do_add_text(page, text, title=title)
+
+    item_id = browser._extract_item_id(item_url)
+    assert item_id, f"paste-text upload returned no UUID: {item_url}"
+
+    try:
+        ok, info = await verify.verify_item_url_fresh_context(
+            item_id, max_wait=20.0,
+        )
+        assert not ok, (
+            f"Fresh-context verify unexpectedly PASSED for paste-text item "
+            f"{item_id}. Either issue #51 has been fixed upstream (great — "
+            "remove this regression guard and the file-upload routing in "
+            "add_text) or our cache-bypass detection broke. Verify info: "
+            f"{info}"
+        )
+        # Sanity: the in-session verify should still pass — proves we're
+        # comparing apples-to-apples (item exists, cache hit makes it look
+        # fine from chrome-hub).
+        ok_cached, info_cached = await verify.verify_item_url(item_id)
+        assert ok_cached, (
+            f"In-session verify also failed for paste-text item — "
+            f"upload may not have completed at all: {info_cached}"
+        )
+    finally:
+        try:
+            await api.delete_item(item_id)
+        except Exception as cleanup_err:
+            pytest.fail(
+                f"cleanup failed for {item_id}: {cleanup_err}. "
+                f"Manual cleanup: speechify-add delete {item_id} --mode api"
             )
