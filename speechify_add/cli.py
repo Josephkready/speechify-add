@@ -28,6 +28,11 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 @click.group(context_settings=CONTEXT_SETTINGS)
 def cli():
     """Add articles to your Speechify listening queue."""
+    # Reclaim any tabs leaked by a prior run that was killed before its
+    # cleanup ran (issue #55). Best-effort + import-light; never blocks the
+    # command the user actually invoked.
+    from .tab_registry import sweep_orphans
+    sweep_orphans()
 
 
 # ---------------------------------------------------------------------------

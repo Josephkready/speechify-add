@@ -80,14 +80,15 @@ async def _refresh_id_token(data: dict) -> str:
 async def _refresh_from_chrome_hub(data: dict) -> str:
     """Extract fresh Firebase tokens from chrome-hub's logged-in Chrome session."""
     try:
-        from chrome_hub import async_new_page
+        import chrome_hub  # noqa: F401  — presence check for a friendly error
     except ImportError:
         raise RuntimeError(
             "Token refresh failed and chrome-hub is not installed. "
             "Run: speechify-add auth setup"
         ) from None
+    from .tab_registry import tracked_page
 
-    async with async_new_page() as page:
+    async with tracked_page() as page:
         await page.goto("https://app.speechify.com", wait_until="load", timeout=30_000)
         await page.wait_for_timeout(3_000)
 

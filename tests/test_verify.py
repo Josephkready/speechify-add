@@ -150,7 +150,7 @@ class TestGetPageTitle:
 
 def _mock_page_cm(evaluate_side_effect):
     """
-    Build a mock async_new_page context manager whose page.evaluate()
+    Build a mock tracked_page context manager whose page.evaluate()
     returns values from evaluate_side_effect (list of return values, one per call).
     """
     mock_locator = AsyncMock()
@@ -170,7 +170,7 @@ class TestSearchLibraryBatchIntegration:
     async def test_integration_empty_query_list_returns_empty(self):
         """Empty input produces empty output without touching the browser."""
         cm = _mock_page_cm([])
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             results = await search_library_batch([])
         assert results == []
 
@@ -178,7 +178,7 @@ class TestSearchLibraryBatchIntegration:
     async def test_integration_returns_none_for_missing_item(self):
         """A query that produces no browser results yields None in output."""
         cm = _mock_page_cm([[]])  # evaluate returns empty list
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             results = await search_library_batch(["nonexistent article"])
         assert results == [None]
 
@@ -186,7 +186,7 @@ class TestSearchLibraryBatchIntegration:
     async def test_integration_returns_pct_for_found_item(self):
         """A query that produces a result yields the parsed listen percentage."""
         cm = _mock_page_cm([[{"title": "My Article", "meta": "73% · web"}]])
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             results = await search_library_batch(["my article"])
         assert results == [73]
 
@@ -201,7 +201,7 @@ class TestSearchLibraryBatchIntegration:
             [],                                               # query 2 not found
             [{"title": "Article C", "meta": "0% · web"}],   # query 3 found
         ])
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             results = await search_library_batch(["article a", "missing", "article c"])
         assert results == [100, None, 0]
 
@@ -212,7 +212,7 @@ class TestSearchLibraryBatchIntegration:
             {"title": "Best Match", "meta": "55% · web"},
             {"title": "Second Match", "meta": "10% · pdf"},
         ]])
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             results = await search_library_batch(["match"])
         assert results == [55]
 
@@ -220,7 +220,7 @@ class TestSearchLibraryBatchIntegration:
     async def test_integration_zero_pct_not_treated_as_missing(self):
         """0% listen progress is a valid result and must not be collapsed to None."""
         cm = _mock_page_cm([[{"title": "Unread Article", "meta": "0% · epub"}]])
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             results = await search_library_batch(["unread"])
         assert results == [0]
         assert results[0] is not None
@@ -282,7 +282,7 @@ class TestVerifyItemUrl:
             url=f"https://app.speechify.com/item/{self.UUID}",
             body_sequence=[self.GOOD_BODY],
         )
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             ok, info = await verify_item_url(self.UUID, max_wait=10)
         assert ok is True
         assert "1 poll" in info  # settled on first poll
@@ -299,7 +299,7 @@ class TestVerifyItemUrl:
                 self.GOOD_BODY,           # poll 3: done
             ],
         )
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             ok, info = await verify_item_url(self.UUID, max_wait=10)
         assert ok is True
         assert "3 poll" in info
@@ -312,7 +312,7 @@ class TestVerifyItemUrl:
             url=f"https://app.speechify.com/item/{self.UUID}",
             body_sequence=["…", "loading…", self.GOOD_BODY],
         )
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             ok, info = await verify_item_url(self.UUID, max_wait=10)
         assert ok is True
 
@@ -324,7 +324,7 @@ class TestVerifyItemUrl:
             url=f"https://app.speechify.com/item/{self.UUID}",
             body_sequence=[self.OOPS_BODY],  # repeats forever
         )
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             ok, info = await verify_item_url(self.UUID, max_wait=4)
         assert ok is False
         assert "Oops" in info
@@ -338,7 +338,7 @@ class TestVerifyItemUrl:
             url="https://app.speechify.com/login",
             body_sequence=["irrelevant"],
         )
-        with patch("speechify_add.verify.async_new_page", return_value=cm):
+        with patch("speechify_add.verify.tracked_page", return_value=cm):
             ok, info = await verify_item_url(self.UUID, max_wait=10)
         assert ok is False
         assert "redirected" in info.lower()

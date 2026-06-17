@@ -13,8 +13,9 @@ import time
 import httpx
 from playwright.async_api import async_playwright
 
-from chrome_hub import async_new_page
 from chrome_hub.browser import CDP_URL
+
+from .tab_registry import forget_tab, record_tab, resolve_target_id, tracked_page
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ async def search_library(query: str) -> list[dict]:
     """
     log.debug("search_library: query=%r", query)
     t0 = time.perf_counter()
-    async with async_new_page() as page:
+    async with tracked_page() as page:
         log.debug("search_library: got page in %.2fs", time.perf_counter() - t0)
 
         t1 = time.perf_counter()
@@ -109,7 +110,7 @@ async def search_library_batch(queries: list[str]) -> list[int | None]:
     Returns a list of listen percentages (0-100) in the same order as queries.
     Returns None for any query where no result was found.
     """
-    async with async_new_page() as page:
+    async with tracked_page() as page:
         await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
         await page.locator('[data-testid="sidebar-import-button"]').wait_for(
             state="visible", timeout=15_000
@@ -186,7 +187,7 @@ async def verify_item_url(
     """
     item_url = f"https://app.speechify.com/item/{item_id}"
     log.debug("verify_item_url: %s (max_wait=%.0fs)", item_url, max_wait)
-    async with async_new_page() as page:
+    async with tracked_page() as page:
         await page.goto(item_url, wait_until="load", timeout=30_000)
         deadline = time.monotonic() + max_wait
         last_reason = "no checks completed before deadline"
@@ -285,6 +286,13 @@ async def verify_item_url_fresh_context(
         try:
             await fresh_ctx.add_cookies(auth_cookies)
             page = await fresh_ctx.new_page()
+            # Track this tab too (issue #55): it's closed in the finally below
+            # on a clean run, but a process killed mid-poll would leak it like
+            # any other tracked_page tab. Registering it lets the next run's
+            # sweep reclaim it.
+            fresh_target_id = await resolve_target_id(page)
+            if fresh_target_id:
+                record_tab(fresh_target_id, item_url)
             try:
                 await page.goto(item_url, wait_until="load", timeout=30_000)
                 deadline = time.monotonic() + max_wait
@@ -325,7 +333,14 @@ async def verify_item_url_fresh_context(
                     f"{max_wait:.0f}s ({polls} polls; last: {last_reason})"
                 )
             finally:
-                await page.close()
+                # forget_tab must run even if page.close() raises (e.g. the
+                # tab was already reclaimed) so the registry doesn't keep a
+                # stale live-PID entry for the rest of this process's life.
+                try:
+                    await page.close()
+                finally:
+                    if fresh_target_id:
+                        forget_tab(fresh_target_id)
         finally:
             await fresh_ctx.close()
 
