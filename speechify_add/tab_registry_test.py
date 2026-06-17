@@ -1,10 +1,30 @@
 """Unit + live tests for the owned-tab registry + orphan sweep (issue #55)."""
 
+import json
 import os
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from speechify_add import tab_registry as tr
+
+
+def _fake_urlopen(payload: bytes):
+    """A urlopen stand-in usable as a context manager + file-like read()."""
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            return payload
+
+    def _open(url, timeout=None):
+        return _Resp()
+
+    return _open
 
 
 @pytest.fixture
@@ -172,6 +192,128 @@ def test_sweep_never_raises_on_internal_error(reg, monkeypatch):
     monkeypatch.setattr(tr, "_list_target_ids", _boom)
     # Public entry point swallows the error and returns [].
     assert tr.sweep_orphans(path=reg) == []
+
+
+def test_read_non_dict_file_returns_empty(reg):
+    # Valid JSON of the wrong type (a list) hits a different branch than
+    # corrupt JSON: it logs a warning and returns {}.
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text("[]")
+    assert tr._read_registry(reg) == {}
+
+
+def test_record_tab_non_string_target_id_is_noop(reg):
+    tr.record_tab(123, "u", path=reg)  # non-str id must never key the registry
+    assert tr._read_registry(reg) == {}
+
+
+# --- _proc_is_speechify (the PID-reuse safety guard) -----------------------
+
+def test_proc_is_speechify_true_for_matching_cmdline(monkeypatch):
+    monkeypatch.setattr(
+        "pathlib.Path.read_bytes",
+        lambda self: b"/usr/bin/python\x00-m\x00speechify_add\x00add\x00",
+    )
+    assert tr._proc_is_speechify(1234) is True
+
+
+def test_proc_is_speechify_false_for_other_process(monkeypatch):
+    monkeypatch.setattr(
+        "pathlib.Path.read_bytes", lambda self: b"/usr/bin/vim\x00notes.txt"
+    )
+    assert tr._proc_is_speechify(1234) is False
+
+
+def test_proc_is_speechify_false_when_proc_gone(monkeypatch):
+    def _raise(self):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr("pathlib.Path.read_bytes", _raise)
+    assert tr._proc_is_speechify(1234) is False
+
+
+def test_proc_is_speechify_conservative_on_oserror(monkeypatch):
+    # Can't read cmdline (e.g. EPERM) → assume ours so we never reap a tab
+    # out from under a process we can't inspect.
+    def _raise(self):
+        raise OSError("EPERM")
+
+    monkeypatch.setattr("pathlib.Path.read_bytes", _raise)
+    assert tr._proc_is_speechify(1234) is True
+
+
+# --- CDP HTTP helpers (real urllib path) -----------------------------------
+
+def test_list_target_ids_returns_page_ids(monkeypatch):
+    payload = json.dumps([
+        {"id": "A", "type": "page"},
+        {"id": "B", "type": "page"},
+        {"id": "W", "type": "service_worker"},  # not a page
+        {"type": "page"},                        # no id
+    ]).encode()
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen(payload))
+    assert tr._list_target_ids() == {"A", "B"}
+
+
+def test_list_target_ids_none_on_connection_error(monkeypatch):
+    def _boom(url, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+    assert tr._list_target_ids() is None
+
+
+def test_list_target_ids_none_on_bad_json(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen(b"{not json"))
+    assert tr._list_target_ids() is None
+
+
+def test_close_target_true_on_success(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen(b"Target closing"))
+    assert tr._close_target("A") is True
+
+
+def test_close_target_false_on_error(monkeypatch):
+    def _boom(url, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+    assert tr._close_target("A") is False
+
+
+# --- track_target (register on open, forget on close) ----------------------
+
+async def test_track_target_registers_then_forgets(reg, monkeypatch):
+    monkeypatch.setattr(tr, "_registry_path", lambda: reg)
+    monkeypatch.setattr(tr, "resolve_target_id", AsyncMock(return_value="TID"))
+    page = MagicMock()
+    page.url = "https://app.speechify.com/"
+
+    async with tr.track_target(page):
+        assert set(tr._read_registry(reg)) == {"TID"}  # registered while open
+    assert tr._read_registry(reg) == {}                 # forgotten on exit
+
+
+async def test_track_target_forgets_on_exception(reg, monkeypatch):
+    monkeypatch.setattr(tr, "_registry_path", lambda: reg)
+    monkeypatch.setattr(tr, "resolve_target_id", AsyncMock(return_value="TID"))
+    page = MagicMock()
+    page.url = "u"
+
+    with pytest.raises(ValueError):
+        async with tr.track_target(page):
+            assert set(tr._read_registry(reg)) == {"TID"}
+            raise ValueError("boom")
+    assert tr._read_registry(reg) == {}  # forgotten even on error
+
+
+async def test_track_target_untracked_when_no_target_id(reg, monkeypatch):
+    monkeypatch.setattr(tr, "_registry_path", lambda: reg)
+    monkeypatch.setattr(tr, "resolve_target_id", AsyncMock(return_value=None))
+
+    async with tr.track_target(MagicMock()):
+        pass
+    assert tr._read_registry(reg) == {}  # nothing recorded
 
 
 # --- live: real chrome-hub round-trip --------------------------------------

@@ -11,8 +11,9 @@ while a persistent CDP consumer is connected (chrome-hub#57).
 A consumer can't clean up after its own ``kill -9`` *during* that run, but it
 can clean up on the *next* run. This module:
 
-1. Records every tab speechify-add opens (CDP target id + the owning PID) to a
-   small JSON file under ``~/.local/state/speechify-add/``.
+1. Records every tab speechify-add opens (CDP target id + the owning PID) to
+   ``~/.local/state/speechify-add/open-tabs.json`` (override the path with the
+   ``SPEECHIFY_ADD_TAB_REGISTRY`` env var).
 2. On the next CLI startup, ``sweep_orphans()`` closes any recorded tab whose
    owning process is no longer a live speechify-add process — those are
    definitively leaks from a killed prior run. Tabs owned by a *live* sibling
@@ -104,8 +105,12 @@ def _write_unlocked(state: dict[str, dict], path: Path) -> None:
         mode="w", dir=str(path.parent), prefix=".open-tabs-", suffix=".tmp",
         delete=False,
     ) as tf:
-        json.dump(state, tf)
         tmp_path = Path(tf.name)
+        try:
+            json.dump(state, tf)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)  # don't leave a stray .tmp behind
+            raise
     os.replace(tmp_path, path)
 
 
@@ -228,7 +233,9 @@ def _close_target(target_id: str, cdp_url: str | None = None) -> bool:
             resp.read()
         return True
     except OSError as e:
-        log.debug("CDP close of %s failed: %s", target_id, e)
+        log.warning(
+            "CDP close of %s failed (tab kept for retry): %s", target_id, e
+        )
         return False
 
 
@@ -248,7 +255,7 @@ def sweep_orphans(
     try:
         return _sweep_orphans(path=path, cdp_url=cdp_url)
     except Exception as e:  # defensive: a sweep must never break the CLI
-        log.debug("sweep_orphans failed: %s", e)
+        log.warning("sweep_orphans encountered an unexpected error: %s", e)
         return []
 
 
@@ -270,6 +277,10 @@ def _sweep_orphans(
     live_ids = _list_target_ids(cdp_url)
     if live_ids is None:
         # chrome-hub unreachable — keep the entries and retry next run.
+        log.warning(
+            "sweep deferred: chrome-hub unreachable, %d orphaned tab(s) "
+            "will retry next run", len(orphans),
+        )
         return []
 
     closed: list[str] = []
@@ -303,7 +314,7 @@ def _safe_url(page) -> str:
         return ""
 
 
-async def _resolve_target_id(page) -> str | None:
+async def resolve_target_id(page) -> str | None:
     """Return the CDP target id backing a Playwright page, or None.
 
     Uses a short-lived CDP session (``Target.getTargetInfo``) and detaches it
@@ -331,7 +342,7 @@ async def track_target(page):
     Wraps any page (not just chrome-hub's ``async_new_page``) so the
     fresh-context verify path can be tracked too.
     """
-    target_id = await _resolve_target_id(page)
+    target_id = await resolve_target_id(page)
     if target_id:
         record_tab(target_id, _safe_url(page))
     try:

@@ -155,9 +155,9 @@ Notes on behavior:
 | Approach | Used by | How |
 |---|---|---|
 | **Consumer API** | `delete` | Direct HTTP calls to Speechify's Firebase Cloud Functions |
-| **Browser automation** | `add`, `text`, `file` | Drives headed Chromium via Playwright with a persistent login profile |
+| **Browser automation** | `add`, `text`, `file` | Drives the shared [chrome-hub](https://github.com/Josephkready/chrome-hub) Chrome over CDP (Playwright `connect_over_cdp`), reusing its persistent login profile |
 
-The browser runs in headed mode (Speechify's clipboard API requires a visible window). On headless servers, Xvfb is used automatically as a virtual display.
+Browser operations connect to chrome-hub's already-running Chrome rather than launching their own — avoiding a ~17s cold start and letting chrome-hub manage the headed/virtual display (Speechify's clipboard API requires a visible window, which chrome-hub provides).
 
 **Tab cleanup.** Browser operations open tabs in the shared [chrome-hub](https://github.com/Josephkready/chrome-hub) Chrome and close them when done. If a `speechify-add` process is killed mid-operation (timeout, `Ctrl-C`, OOM during batch uploads) the close never runs and the tab is stranded. To prevent these from piling up, every tab is recorded with its owning PID; the next `speechify-add` invocation sweeps the registry and closes any tab whose owning process is no longer alive (issue #55). Tabs owned by a *live* concurrent run are never touched.
 

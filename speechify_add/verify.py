@@ -15,7 +15,7 @@ from playwright.async_api import async_playwright
 
 from chrome_hub.browser import CDP_URL
 
-from .tab_registry import _resolve_target_id, forget_tab, record_tab, tracked_page
+from .tab_registry import forget_tab, record_tab, resolve_target_id, tracked_page
 
 log = logging.getLogger(__name__)
 
@@ -290,7 +290,7 @@ async def verify_item_url_fresh_context(
             # on a clean run, but a process killed mid-poll would leak it like
             # any other tracked_page tab. Registering it lets the next run's
             # sweep reclaim it.
-            fresh_target_id = await _resolve_target_id(page)
+            fresh_target_id = await resolve_target_id(page)
             if fresh_target_id:
                 record_tab(fresh_target_id, item_url)
             try:
@@ -333,9 +333,14 @@ async def verify_item_url_fresh_context(
                     f"{max_wait:.0f}s ({polls} polls; last: {last_reason})"
                 )
             finally:
-                await page.close()
-                if fresh_target_id:
-                    forget_tab(fresh_target_id)
+                # forget_tab must run even if page.close() raises (e.g. the
+                # tab was already reclaimed) so the registry doesn't keep a
+                # stale live-PID entry for the rest of this process's life.
+                try:
+                    await page.close()
+                finally:
+                    if fresh_target_id:
+                        forget_tab(fresh_target_id)
         finally:
             await fresh_ctx.close()
 
