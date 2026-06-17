@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from chrome_hub import async_new_page
+from .tab_registry import tracked_page
 
 log = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ class BrowserSession:
         self._console_errors: list[str] = []
 
     async def __aenter__(self):
-        self._page_cm = async_new_page()
+        self._page_cm = tracked_page()
         self._page = await self._page_cm.__aenter__()
         self._page.on("pageerror", lambda err: self._console_errors.append(str(err)))
 
@@ -267,7 +267,7 @@ async def add_url(url: str, debug: bool = False) -> str:
     accepted the URL but didn't redirect — the URL was still queued, we just
     couldn't observe its id.
     """
-    async with async_new_page() as page:
+    async with tracked_page() as page:
         console_errors = []
         page.on("pageerror", lambda err: console_errors.append(str(err)))
 
@@ -306,7 +306,7 @@ async def add_file(path: Path, title: str = "", debug: bool = False) -> str:
     log.debug("add_file: start path=%s size=%.1fKB title=%r", path, size_kb, title)
     t0 = time.perf_counter()
 
-    async with async_new_page() as page:
+    async with tracked_page() as page:
         log.debug("add_file: got page in %.2fs", time.perf_counter() - t0)
 
         t1 = time.perf_counter()
@@ -402,7 +402,7 @@ async def screenshot_walkthrough() -> Path:
     """
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-    async with async_new_page() as page:
+    async with tracked_page() as page:
         await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
         await page.wait_for_timeout(3_000)
 

@@ -464,7 +464,7 @@ class TestIntegrationBrowserSessionLifecycle:
             cm.__aenter__ = AsyncMock(return_value=inner_page)
             cm.__aexit__ = AsyncMock(return_value=None)
 
-            with patch("speechify_add.browser.async_new_page", return_value=cm), \
+            with patch("speechify_add.browser.tracked_page", return_value=cm), \
                  patch("speechify_add.browser._init_speechify_page", AsyncMock()):
                 try:
                     async with BrowserSession() as session:
