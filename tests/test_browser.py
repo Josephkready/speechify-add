@@ -12,6 +12,7 @@ import pytest_asyncio
 
 from speechify_add.browser import (
     _assert_logged_in,
+    _init_speechify_page,
     _extract_item_id,
     _find_first_visible,
     _click_first_visible,
@@ -61,6 +62,8 @@ class TestAssertLoggedIn:
         "https://app.speechify.com/sign-in",
         "https://app.speechify.com/auth",
         "https://app.speechify.com/auth?redirect=/",
+        # Real-world logged-out redirect observed 2026-07-08 (dailybrief 0/20).
+        "https://speechify.com/auth/web/?returnTo=https%3A%2F%2Fapp.speechify.com%2F",
     ])
     def test_raises_on_login_urls(self, login_url):
         page = _make_page(url=login_url)
@@ -75,6 +78,37 @@ class TestAssertLoggedIn:
     def test_no_error_on_authenticated_urls(self, ok_url):
         page = _make_page(url=ok_url)
         _assert_logged_in(page)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# 1b. _init_speechify_page — fail fast on logged-out session
+# ---------------------------------------------------------------------------
+
+class TestInitSpeechifyPage:
+    def _page(self, url):
+        page = _make_page(url=url)
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.locator = MagicMock(return_value=_make_locator(visible=True))
+        return page
+
+    def test_logged_out_fails_before_sidebar_wait(self):
+        """A redirect to /auth must raise immediately, without ever waiting on
+        the sidebar locator (that 15s timeout is the bug this guards against)."""
+        page = self._page(
+            "https://speechify.com/auth/web/?returnTo=https%3A%2F%2Fapp.speechify.com%2F"
+        )
+        with pytest.raises(RuntimeError, match="Session expired"):
+            asyncio.get_event_loop().run_until_complete(_init_speechify_page(page))
+        page.goto.assert_awaited_once()
+        page.locator.assert_not_called()  # never reached the sidebar wait
+
+    def test_logged_in_waits_for_sidebar(self):
+        page = self._page("https://app.speechify.com/")
+        asyncio.get_event_loop().run_until_complete(
+            _init_speechify_page(page)
+        )  # must not raise
+        page.locator.assert_called_with('[data-testid="sidebar-import-button"]')
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +243,37 @@ class TestBrowserSessionInit:
     def test_debug_flag_stored(self):
         s = BrowserSession(debug=True)
         assert s.debug is True
+
+
+class TestBrowserSessionNavigateToLibrary:
+    def _session(self, url):
+        session = BrowserSession()
+        page = _make_page(url=url)
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.locator = MagicMock(return_value=_make_locator(visible=True))
+        session._page = page
+        return session, page
+
+    def test_logged_out_fails_before_sidebar_wait(self):
+        """A session that expired mid-batch must fast-fail on the next
+        navigation rather than burn the 15s sidebar timeout."""
+        session, page = self._session(
+            "https://speechify.com/auth/web/?returnTo=https%3A%2F%2Fapp.speechify.com%2F"
+        )
+        with pytest.raises(RuntimeError, match="Session expired"):
+            asyncio.get_event_loop().run_until_complete(
+                session._navigate_to_library()
+            )
+        page.goto.assert_awaited_once()
+        page.locator.assert_not_called()  # never reached the sidebar wait
+
+    def test_logged_in_waits_for_sidebar(self):
+        session, page = self._session("https://app.speechify.com/")
+        asyncio.get_event_loop().run_until_complete(
+            session._navigate_to_library()
+        )  # must not raise
+        page.locator.assert_called_with('[data-testid="sidebar-import-button"]')
 
 
 # ---------------------------------------------------------------------------

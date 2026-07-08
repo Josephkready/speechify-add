@@ -91,12 +91,21 @@ async def _init_speechify_page(page):
     t0 = time.perf_counter()
     await page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
     log.debug("init: page.goto(load) done in %.2fs", time.perf_counter() - t0)
+    # Fail fast on a logged-out session. app.speechify.com redirects to the
+    # auth page, where the sidebar never renders — so without this check the
+    # sidebar wait below burns its full 15s timeout and surfaces an opaque
+    # "Locator.wait_for: Timeout exceeded", which callers (e.g. dailybrief)
+    # misread as a transient error and retry 3x per item. Checking the URL
+    # first turns that into an immediate, actionable "Session expired".
+    _assert_logged_in(page)
     t1 = time.perf_counter()
     await page.locator('[data-testid="sidebar-import-button"]').wait_for(
         state="visible", timeout=15_000
     )
     log.debug("init: sidebar visible in %.2fs", time.perf_counter() - t1)
     await page.wait_for_timeout(1_000)
+    # Re-check after the app has fully settled: a stale session can render the
+    # shell briefly before the SPA bounces to /auth.
     _assert_logged_in(page)
     log.debug("init: total %.2fs", time.perf_counter() - t0)
 
@@ -141,6 +150,11 @@ class BrowserSession:
     async def _navigate_to_library(self):
         """Navigate back to the Speechify library between operations."""
         await self._page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+        # Same fast-fail as _init_speechify_page: if the session expired
+        # mid-batch, the sidebar never renders and the wait below would burn
+        # its full 15s timeout with an opaque error. Catch the /auth redirect
+        # first so the batch aborts with an actionable "Session expired".
+        _assert_logged_in(self._page)
         await self._page.locator('[data-testid="sidebar-import-button"]').wait_for(
             state="visible", timeout=15_000
         )
@@ -485,6 +499,7 @@ async def screenshot_walkthrough() -> Path:
 
 def _assert_logged_in(page):
     if any(s in page.url for s in ("/login", "/signin", "/sign-in", "/auth")):
+        log.warning("Session expired: redirected to %s", page.url)
         raise RuntimeError("Session expired. Run: speechify-add auth setup")
 
 
