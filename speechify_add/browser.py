@@ -150,6 +150,11 @@ class BrowserSession:
     async def _navigate_to_library(self):
         """Navigate back to the Speechify library between operations."""
         await self._page.goto("https://app.speechify.com", wait_until="load", timeout=60_000)
+        # Same fast-fail as _init_speechify_page: if the session expired
+        # mid-batch, the sidebar never renders and the wait below would burn
+        # its full 15s timeout with an opaque error. Catch the /auth redirect
+        # first so the batch aborts with an actionable "Session expired".
+        _assert_logged_in(self._page)
         await self._page.locator('[data-testid="sidebar-import-button"]').wait_for(
             state="visible", timeout=15_000
         )
@@ -494,6 +499,7 @@ async def screenshot_walkthrough() -> Path:
 
 def _assert_logged_in(page):
     if any(s in page.url for s in ("/login", "/signin", "/sign-in", "/auth")):
+        log.warning("Session expired: redirected to %s", page.url)
         raise RuntimeError("Session expired. Run: speechify-add auth setup")
 
 

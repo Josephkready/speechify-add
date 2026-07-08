@@ -245,6 +245,37 @@ class TestBrowserSessionInit:
         assert s.debug is True
 
 
+class TestBrowserSessionNavigateToLibrary:
+    def _session(self, url):
+        session = BrowserSession()
+        page = _make_page(url=url)
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.locator = MagicMock(return_value=_make_locator(visible=True))
+        session._page = page
+        return session, page
+
+    def test_logged_out_fails_before_sidebar_wait(self):
+        """A session that expired mid-batch must fast-fail on the next
+        navigation rather than burn the 15s sidebar timeout."""
+        session, page = self._session(
+            "https://speechify.com/auth/web/?returnTo=https%3A%2F%2Fapp.speechify.com%2F"
+        )
+        with pytest.raises(RuntimeError, match="Session expired"):
+            asyncio.get_event_loop().run_until_complete(
+                session._navigate_to_library()
+            )
+        page.goto.assert_awaited_once()
+        page.locator.assert_not_called()  # never reached the sidebar wait
+
+    def test_logged_in_waits_for_sidebar(self):
+        session, page = self._session("https://app.speechify.com/")
+        asyncio.get_event_loop().run_until_complete(
+            session._navigate_to_library()
+        )  # must not raise
+        page.locator.assert_called_with('[data-testid="sidebar-import-button"]')
+
+
 # ---------------------------------------------------------------------------
 # 5. BrowserSession.__aexit__ does not suppress exceptions
 # ---------------------------------------------------------------------------
